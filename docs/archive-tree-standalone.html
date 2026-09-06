@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>شجرة الأرشيف — تصميم مستقل قابل للنسخ</title>
+<!--
+  ============================================================
+  تصميم شجرة الأرشيف الهرمية (طرف ← عملة ← سنة ← جلسة)
+  نسخة مستقلة 100% — HTML + CSS + JavaScript بلا أي مكتبات.
+  انسخ <style> و <div class="atree"> و <script> لموقعك مباشرة.
+  البيانات مصفوفة واحدة flat — البناء الشجري يتولده الكود تلقائياً
+  بتجميع حسب (الطرف ثم العملة ثم السنة) — غيّر المصفوفة وستتولد الشجرة.
+  ============================================================
+-->
+<style>
+  :root {
+    --at-primary: #0F4C81;
+    --at-border: #E2E8F0;
+    --at-hover: #F1F5F9;
+    --at-selected: #E8F1F8;
+    --at-text: #1E293B;
+    --at-muted: #64748B;
+  }
+
+  .atree-card {
+    background: #fff;
+    border: 1px solid var(--at-border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    max-width: 420px;
+    font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif;
+    color: var(--at-text);
+  }
+  .atree-card h3 {
+    margin: 0 0 12px;
+    font-size: 14px;
+    color: var(--at-primary);
+  }
+
+  /* سطر واحد في الشجرة (مجلد أو ورقة) */
+  .atree-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+    line-height: 1.6;
+  }
+  .atree-row:hover { background: var(--at-hover); }
+  .atree-row.selected { background: var(--at-selected); outline: 1px solid var(--at-primary); }
+
+  /* سهم الطي/الفتح — يدور 90° عند الفتح (نفس سلوك ▼ في الصورة) */
+  .atree-arrow {
+    flex: 0 0 16px;
+    width: 16px; height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--at-muted);
+    transition: transform 0.2s ease;
+    font-size: 11px;
+  }
+  .atree-row.open > .atree-arrow { transform: rotate(-90deg); } /* RTL: فتح = دوران للأسفل */
+  .atree-arrow.hidden { visibility: hidden; } /* الأوراق بلا أبناء: مكان السهم محفوظ فارغاً */
+
+  /* الأبناء: يُطوون تحت الأب مع خط إرشادي جانبي */
+  .atree-children {
+    margin-inline-start: 18px;
+    padding-inline-start: 10px;
+    border-inline-start: 1px dashed var(--at-border);
+    display: none;
+  }
+  .atree-children.open { display: block; }
+
+  .atree-partner { font-weight: 700; }
+  .atree-leaf-num { font-variant-numeric: tabular-nums; font-size: 13px; }
+
+  /* شارة العملة الصغيرة */
+  .atree-cur {
+    display: inline-block;
+    padding: 0 7px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid;
+    line-height: 20px;
+  }
+  .atree-cur.YER { color: #B45309; background: #FEF3C7; border-color: #FCD34D; }
+  .atree-cur.USD { color: #15803D; background: #DCFCE7; border-color: #86EFAC; }
+  .atree-cur.SAR { color: #0369A1; background: #E0F2FE; border-color: #7DD3FC; }
+
+  .atree-status {
+    font-size: 11px;
+    border-radius: 999px;
+    padding: 0 8px;
+    line-height: 20px;
+  }
+  .atree-status.closed { background: #DCFCE7; color: #166534; }
+  .atree-status.open   { background: #FEF9C3; color: #854D0E; }
+</style>
+</head>
+<body>
+
+<div class="atree-card">
+  <h3>أرشيف الحسابات — طرف ← عملة ← سنة</h3>
+  <div class="atree" id="archiveTree"></div>
+</div>
+
+<script>
+/**
+ * 1) البيانات: مصفوفة جلسات مسطحة — أضف/احذف أسطراً وستتغير الشجرة تلقائياً.
+ *    (في نظامك الحقيقي تأتي من GET /api/v1/... وتحوَّل لهذا الشكل فقط)
+ */
+const SESSIONS = [
+  { partner: 'شركة دريم لاند للأغذية',   currency: 'YER', year: '2026', period: '2026-08', id: 1031, status: 'open' },
+  { partner: 'شركة دريم لاند للأغذية',   currency: 'YER', year: '2026', period: '2026-07', id: 1024, status: 'closed' },
+  { partner: 'شركة دريم لاند للأغذية',   currency: 'USD', year: '2026', period: '2026-06', id: 1017, status: 'closed' },
+  { partner: 'مستشفى ابن سينا التخصصي',  currency: 'YER', year: '2026', period: '2026-08', id: 1029, status: 'open' },
+  { partner: 'مستشفى ابن سينا التخصصي',  currency: 'YER', year: '2025', period: '2025-12', id: 998,  status: 'closed' },
+  { partner: 'مؤسسة النور للقرطاسية',    currency: 'USD', year: '2026', period: '2026-07', id: 1026, status: 'closed' },
+];
+
+/**
+ * 2) تجميع ثلاثي المستويات: طرف ← عملة ← سنة (خصائص كائن تُنشأ ديناميكياً)
+ */
+const tree = {};
+for (const s of SESSIONS) {
+  (((tree[s.partner] ??= {})[s.currency] ??= {})[s.year] ??= []).push(s);
+}
+
+/** 3) رسم عقدة واحدة + أبنائها بشكل متكرر (السهم يظهر فقط لمن له أبناء) */
+function nodeRow({ label, html, hasChildren = true, open = false, onSelect }) {
+  const row = document.createElement('div');
+  row.className = 'atree-row' + (open ? ' open' : '');
+  row.innerHTML =
+    `<span class="atree-arrow${hasChildren ? '' : ' hidden'}">▶</span>` + (html ?? label);
+  const children = document.createElement('div');
+  children.className = 'atree-children' + (open ? ' open' : '');
+  row.addEventListener('click', (e) => {
+    if (!hasChildren && onSelect) onSelect(row, e);
+    if (hasChildren) row.classList.toggle('open');
+    children.classList.toggle('open');
+  });
+  return { row, children };
+}
+
+/** 4) بناء الشجرة كاملة: طرف ← عملة ← سنة ← أوراق الجلسات */
+const root = document.getElementById('archiveTree');
+for (const [partner, currencies] of Object.entries(tree)) {
+  const partnerNode = nodeRow({ html: `<span class="atree-partner">${partner}</span>`, open: true });
+  for (const [currency, years] of Object.entries(currencies)) {
+    const curNode = nodeRow({ html: `<span class="atree-cur ${currency}">${currency}</span>` });
+    for (const [year, sessions] of Object.entries(years)) {
+      const yearNode = nodeRow({ html: `<span class="atree-leaf-num">${year}</span>` });
+      for (const s of sessions) {
+        const leaf = nodeRow({
+          hasChildren: false,
+          html:
+            `<span class="atree-leaf-num">#${s.id} — ${s.period}</span>` +
+            `<span class="atree-status ${s.status === 'closed' ? 'closed' : 'open'}">` +
+            (s.status === 'closed' ? 'مغلقة' : 'مفتوحة') + `</span>`,
+          onSelect: (row) => {
+            // هنا تضع فتح تفاصيل الجلسة — نفس نمط «تفاصيل الجلسة المختارة»
+            root.querySelectorAll('.atree-row.selected').forEach((r) => r.classList.remove('selected'));
+            row.classList.add('selected');
+            console.log('اختيار جلسة:', s);
+          },
+        });
+        yearNode.children.appendChild(leaf.row);
+      }
+      curNode.children.appendChild(yearNode.row);
+    }
+    partnerNode.children.appendChild(curNode.row);
+  }
+  root.appendChild(partnerNode.row);
+  root.appendChild(partnerNode.children);
+}
+</script>
+</body>
+</html>
