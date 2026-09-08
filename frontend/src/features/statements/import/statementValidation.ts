@@ -66,9 +66,7 @@ export function validateLine(line: PreviewLine): LineError[] {
   if (hasCredit && parseAmount(line.creditRaw) === null) {
     errors.push({ field: 'credit', message: `دائن غير رقمي: «${line.creditRaw}»` });
   }
-  if (hasDebit && hasCredit) {
-    errors.push({ field: 'debit', message: 'لا يمكن ملء المدين والدائن معاً في بند واحد' });
-  }
+  // مدين+دائن معاً مسموح (عرف محاسبي: فاتورة سُددت نقداً تظهر بالجهتين في سطر واحد)
   return errors;
 }
 

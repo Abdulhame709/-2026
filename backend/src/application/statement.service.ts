@@ -19,8 +19,8 @@ import {
 /**
  * خدمة الاستيراد والكشوفات (Module 3):
  * upload=معاينة بالذاكرة (لا قاعدة) → تصحيح بنود → commit=معاملة كتابة واحدة.
- * محقق القبول عند الاعتماد (Q11 صرامة كاملة): كل بند بتاريخ صالح،
- * لا مدين ودائن معاً، والمبالغ أرقاماً — وإلا 422 بتفاصيل لكل بند.
+ * محقق القبول عند الاعتماد (Q11 صرامة كاملة): كل بند بتاريخ صالح والمبالغ أرقاماً —
+ * وإلا 422 بتفاصيل لكل بند. (مدين+دائن معاً مسموح: فاتورة سُددت نقداً بالجهتين — عرف محاسبي)
  */
 
 const UPLOAD_DIR = path.resolve('storage/uploads');
@@ -166,9 +166,7 @@ export class StatementService {
       if (debit === null && credit === null) {
         errors.push({ field: label, messageAr: `البند ${raw.lineNo}: لا مدين ولا دائن — أدخل أحدهما` });
       }
-      if (debit !== null && credit !== null) {
-        errors.push({ field: label, messageAr: `البند ${raw.lineNo}: مدين ودائن معاً ممنوع — البند إما مدين أو دائن` });
-      }
+      // مدين+دائن معاً مسموح عمداً (عرف محاسبي: فاتورة سُددت نقداً تظهر بالجهتين في سطر واحد)
       if (debit !== null && debit < 0) errors.push({ field: label, messageAr: `البند ${raw.lineNo}: المدين لا يكون سالباً` });
       if (credit !== null && credit < 0) errors.push({ field: label, messageAr: `البند ${raw.lineNo}: الدائن لا يكون سالباً` });
 

@@ -42,8 +42,8 @@ async function getWorker(): Promise<OcrWorker> {
 
 const DATE_RE = /\b(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4})\b/;
 const NUM_RE = /-?\d{1,3}(?:,\d{3})+(?:\.\d{1,4})?|-?\d+(?:\.\d{1,4})?/g;
-const OPENING_HINT = /(منقول|افتتاحي|opening\s*balance|b\/f)/i;
-const CLOSING_HINT = /(ختامي|ختامية|closing\s*balance|c\/f)/i;
+const OPENING_HINT = /(منقول|فتتاحي|رصيد|opening\s*balance|b\/f)/i; // «فتتاحي» تلتقط افتتاحي والإفتتاحي
+const CLOSING_HINT = /(ختامي|ختامية|نهائي|إجمالي|اجمالي|المجموع|closing\s*balance|c\/f)/i;
 
 const toNum = (raw: string): number | null => {
   const n = Number(raw.replace(/,/g, ''));
@@ -65,8 +65,18 @@ export interface OcrLine {
 const REF_TOKEN_RE = /[A-Za-z\u0600-\u06FF][A-Za-z0-9\u0600-\u06FF_-]*\d[\d.,]*/g;
 const stripRefs = (s: string): string => s.replace(REF_TOKEN_RE, ' ');
 
+/** ترويسات وتذييلات الكشوف — كلمات مفردة (مستقلة عن ترتيب الكلمات لأن استخراج RTL قد يعكسها) */
+const HEADER_WORD = /(تلفون|هاتف|فاكس|الطباعة|طباعة|صفحة|page\s*\d|العنوان|الفترة)/i;
+const isHeaderLine = (raw: string): boolean => {
+  if (HEADER_WORD.test(raw)) return true;
+  const has = (w: string) => raw.includes(w);
+  if (has('كشف') && has('حساب')) return true;
+  if (has('اسم') && (has('العميل') || has('المورد'))) return true;
+  return false;
+};
+
 function lineToRow(line: string, lineNo: number, confidence: number | null): OcrLine | null {
-  const cleaned = line.replace(/\s+/g, ' ').replace(/[|¦]/g, ' | ').replace(/ {2,}/g, ' ').trim();
+  const cleaned = line.replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').replace(/\s+/g, ' ').replace(/[|¦]/g, ' | ').replace(/ {2,}/g, ' ').trim();
   if (cleaned.length < 3) return null;
 
   // تخطيط أعمدة صريح — تحليل عام مستقل عن اتجاه المقاطع (منطقي أو بصري):
@@ -103,7 +113,8 @@ function lineToRow(line: string, lineNo: number, confidence: number | null): Ocr
   const dateRaw = dateMatch ? dateMatch[1] : '';
   const withoutDate = dateMatch ? (cleaned.slice(0, dateMatch.index) + ' ' + cleaned.slice(dateMatch.index + dateMatch[0].length)).trim() : cleaned;
   const nums = (stripRefs(withoutDate).match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
-  const amounts = nums.slice(-2);
+  // كشوف التفصيل بعمود رصيد مجمع: آخر رقم رصيد وليس حركة — نستبعده عند ازدحام الأرقام ثم نأخذ الآخرين
+  const amounts = (nums.length >= 3 ? nums.slice(0, -1) : nums).slice(-2);
   let description = withoutDate;
   for (const raw of withoutDate.match(NUM_RE) ?? []) description = description.replace(raw, ' ');
   description = description.replace(/\s+/g, ' ').replace(/^[-–—:]+|[-–—:]+$/g, '').trim();
@@ -189,30 +200,63 @@ export class OcrService {
     type PdfPage = Awaited<ReturnType<typeof doc.getPage>>;
 
     // أسطر → صفوف إرشادية للمراجعة (سطرا الافتتاحي والختامي ليسا بندين)
-    const parseAll = (raws: string[], conf: number | null) => {
+    const parseAll = (raws: string[], conf: number | null, opts?: { requireDate?: boolean }) => {
+      const requireDate = opts?.requireDate ?? true;
       const out: OcrLine[] = [];
       let op: number | null = null;
+      let prev: number | null = null; // سلسلة الرصيد المجمع لكشوف التفصيل
       for (const raw of raws) {
+        // ترويسات وتذييلات الكشف (تلفون/فاكس/طباعة/صفحة/عناوين/إجماليات) — ليست بنوداً أبداً
+        if (isHeaderLine(raw)) continue;
         if (CLOSING_HINT.test(raw)) continue;
         if (OPENING_HINT.test(raw)) {
           const nums = (raw.match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
-          if (nums.length === 1) {
-            if (op == null) op = Math.abs(nums[0]);
-            continue;
-          }
+          const nz = nums.filter((n) => n !== 0);
+          // الافتتاحي: رقم واحد، أو رقمين أحدهما صفر (عمودا مدين/دائن) — نأخذ غير الصفر
+          if (op == null && (nz.length === 1 || nums.length === 1)) op = Math.abs(nz[0] ?? nums[0]);
+          continue; // سطر الافتتاحي نفسه ليس بنداً مهما كان شكله
         }
         const row = lineToRow(raw, out.length + 1, conf);
-        if (row) out.push(row);
+        if (!row) continue;
+        if (requireDate) {
+          // البند الحقيقي له تاريخ ومبلغ — ما عدا ذلك بقايا ترويسة/فواصل
+          if (!row.dateRaw || (!row.debitRaw && !row.creditRaw)) continue;
+          // سلسلة الرصيد الذاتية التصحيح: ثلاثية متتالية (مدين، دائن، رصيد) تحقق
+          // الرصيد = السابق − مدين + دائن — إثبات رياضي لا تخمين مهما اختلف ترتيب الأعمدة
+          if (prev == null && op != null) prev = op;
+          const dm = DATE_RE.exec(raw);
+          const withoutDate = dm ? raw.slice(0, dm.index) + ' ' + raw.slice(dm.index + dm[0].length) : raw;
+          const nums = (stripRefs(withoutDate).match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
+          if (prev != null) {
+            let matched = false;
+            for (let i = 0; i + 2 < nums.length; i++) {
+              const d = nums[i];
+              const c = nums[i + 1];
+              const b = nums[i + 2];
+              if (d == null || c == null || b == null) break;
+              if (Math.abs(b - (prev - d + c)) < 0.005 || Math.abs(b - (prev + d - c)) < 0.005) {
+                row.debitRaw = d !== 0 ? String(Math.abs(d)) : '';
+                row.creditRaw = c !== 0 ? String(Math.abs(c)) : '';
+                prev = b;
+                matched = true;
+                break;
+              }
+            }
+            // بلا تطابق: نُقدّر السير من نتيجة lineToRow الاسترشادية لنكمل السلسلة
+            if (!matched) {
+              const d = Number(row.debitRaw || 0);
+              const c = Number(row.creditRaw || 0);
+              prev = prev - d + c;
+            }
+          }
+        }
+        out.push(row);
       }
       return { lines: out, opening: op };
     };
 
-    // جودة الصفحة: كثرة الأسطر ذات الجهتين معاً (مدين+دائن معاً) علامة طبقة نصية مكسورة الترميز
-    const score = (ls: OcrLine[]) => {
-      if (ls.length === 0) return 0;
-      const both = ls.filter((l) => l.debitRaw && l.creditRaw).length;
-      return ls.length * (1 - both / ls.length);
-    };
+    // جودة الصفحة: عدد البنود القابلة للاستخدام (مدين+دائن معاً عرف محاسبي مشروع وليس عيباً)
+    const score = (ls: OcrLine[]) => ls.length;
 
     let confidence: number | null = null;
     const ocrPageLines = async (page: PdfPage): Promise<string[]> => {
@@ -259,7 +303,7 @@ export class OcrService {
         chars < 25 || textParsed.lines.length === 0 || score(textParsed.lines) < textParsed.lines.length * 0.6;
       if (needOcr) {
         try {
-          const ocrParsed = parseAll(await ocrPageLines(page), confidence);
+          const ocrParsed = parseAll(await ocrPageLines(page), confidence, { requireDate: true });
           usedOcr = true;
           if (score(ocrParsed.lines) >= score(chosen.lines)) {
             chosen = ocrParsed;

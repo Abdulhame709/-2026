@@ -60,12 +60,12 @@ export interface OcrDraft {
   lines: OcrDraftLine[];
 }
 
-/** استخراج بنود كشف PDF محلياً (طبقة نصية أو OCR) — مسودة مراجعة فقط */
-export function ocrStatementPdf(accountId: number, side: StatementSide, file: File): Promise<OcrDraft> {
-  return uploadFile<OcrDraft>('/api/v1/statements/ocr', file, {
+/** استخراج بنود كشف PDF محلياً (طبقة نصية أو OCR) — مسودة مراجعة فقط */export function ocrStatementPdf(accountId: number, side: StatementSide, file: File): Promise<OcrDraft> {
+  // الخادم يغلّف المسودة: { draft: {...} } — نفك الغلاف هنا
+  return uploadFile<{ draft: OcrDraft }>('/api/v1/statements/ocr', file, {
     accountId: String(accountId),
     side,
-  });
+  }).then((r) => r.draft);
 }
 
 /** اعتماد بنود بعد المراجعة (مسار الإدخال اليدوي نفسه) */

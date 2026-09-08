@@ -117,8 +117,9 @@ export function parseDate(raw: unknown, formats: string[]): string | null {
   return null;
 }
 
+/** خلايا ملفات Trend تحمل علامات اتجاه خفية تكسر البحث العربي — تُنزع هنا دائماً */
 const CELL = (v: unknown): string =>
-  v instanceof Date ? isoDate(v) : String(v ?? '').trim();
+  v instanceof Date ? isoDate(v) : String(v ?? '').replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').trim();
 
 export function parseStatementFile(
   buffer: Buffer,
@@ -173,11 +174,11 @@ export function parseStatementFile(
     const creditRaw = at('credit');
     const description = at('description');
 
-    // صف أرصدة الترويسة: تاريخ غير قابل للتحليل + كلمة «رصيد» في أي نص + مبلغ = افتتاحي ثم ختامي.
-    // (مكان كلمة رصيد يختلف بين الملفات: عمود التاريخ أو البيان)
+    // صف أرصدة/مجاميع الترويسة: تاريخ غير قابل للتحليل + كلمة رصيد/افتتاحي/إجمالي/نهائي = افتتاحي ثم ختامي.
+    // (مكان الكلمة يختلف بين الملفات: عمود التاريخ أو البيان)
     const balanceText = `${dateRaw} ${description}`;
     const dateParsedHere = parseDate(dateRaw, template.dateFormats);
-    if (dateParsedHere === null && /رصيد/.test(balanceText)) {
+    if (dateParsedHere === null && /(رصيد|فتتاحي|افتتاحي|إجمالي|اجمالي|مجموع|نهائي|ختامي)/.test(balanceText)) {
       const bal = amountOf(debitRaw) ?? amountOf(creditRaw);
       if (bal !== null) {
         if (opening === null) opening = bal;
