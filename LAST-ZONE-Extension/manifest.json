@@ -1,0 +1,72 @@
+{
+  "manifest_version": 3,
+  "name": "LAST ZONE",
+  "version": "9.7.2",
+  "description": "LAST ZONE Pro for Lovable - High performance AI injection engine.",
+  "permissions": [
+    "storage",
+    "cookies",
+    "tabs"
+  ],
+  "host_permissions": [
+    "*://lovable.dev/*",
+    "*://*.lovable.dev/*",
+    "https://hdwacqhkfxledujodhft.supabase.co/*",
+    "http://52.21.185.77:3000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://lovable.dev/*",
+        "*://*.lovable.dev/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "*://lovable.dev/*",
+        "*://*.lovable.dev/*"
+      ],
+      "js": [
+        "inject.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "inject.js",
+        "icons/*"
+      ],
+      "matches": [
+        "*://lovable.dev/*",
+        "*://*.lovable.dev/*"
+      ]
+    }
+  ]
+}
