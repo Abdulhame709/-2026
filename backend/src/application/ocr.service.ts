@@ -154,6 +154,63 @@ function textLayerLines(items: Array<{ str?: string; transform: number[] }>): st
     .filter(Boolean);
 }
 
+/** تحليل أسطر نصية إلى بنود إرشادية للمراجعة — يفصل الترويسات/الافتتاحي/الختامي عن البنود.
+ *  مشتركة بين استخراج PDF واستخراج الصور (نفس منطق التحليل لضمان اتساق النتائج). */
+function parseAll(raws: string[], conf: number | null, opts?: { requireDate?: boolean }) {
+  const requireDate = opts?.requireDate ?? true;
+  const out: OcrLine[] = [];
+  let op: number | null = null;
+  let prev: number | null = null; // سلسلة الرصيد المجمع لكشوف التفصيل
+  for (const raw of raws) {
+    // ترويسات وتذييلات الكشف (تلفون/فاكس/طباعة/صفحة/عناوين/إجماليات) — ليست بنوداً أبداً
+    if (isHeaderLine(raw)) continue;
+    if (CLOSING_HINT.test(raw)) continue;
+    if (OPENING_HINT.test(raw)) {
+      const nums = (raw.match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
+      const nz = nums.filter((n) => n !== 0);
+      // الافتتاحي: رقم واحد، أو رقمين أحدهما صفر (عمودا مدين/دائن) — نأخذ غير الصفر
+      if (op == null && (nz.length === 1 || nums.length === 1)) op = Math.abs(nz[0] ?? nums[0]);
+      continue; // سطر الافتتاحي نفسه ليس بنداً مهما كان شكله
+    }
+    const row = lineToRow(raw, out.length + 1, conf);
+    if (!row) continue;
+    if (requireDate) {
+      // البند الحقيقي له تاريخ ومبلغ — ما عدا ذلك بقايا ترويسة/فواصل
+      if (!row.dateRaw || (!row.debitRaw && !row.creditRaw)) continue;
+      // سلسلة الرصيد الذاتية التصحيح: ثلاثية متتالية (مدين، دائن، رصيد) تحقق
+      // الرصيد = السابق − مدين + دائن — إثبات رياضي لا تخمين مهما اختلف ترتيب الأعمدة
+      if (prev == null && op != null) prev = op;
+      const dm = DATE_RE.exec(raw);
+      const withoutDate = dm ? raw.slice(0, dm.index) + ' ' + raw.slice(dm.index + dm[0].length) : raw;
+      const nums = (stripRefs(withoutDate).match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
+      if (prev != null) {
+        let matched = false;
+        for (let i = 0; i + 2 < nums.length; i++) {
+          const d = nums[i];
+          const c = nums[i + 1];
+          const b = nums[i + 2];
+          if (d == null || c == null || b == null) break;
+          if (Math.abs(b - (prev - d + c)) < 0.005 || Math.abs(b - (prev + d - c)) < 0.005) {
+            row.debitRaw = d !== 0 ? String(Math.abs(d)) : '';
+            row.creditRaw = c !== 0 ? String(Math.abs(c)) : '';
+            prev = b;
+            matched = true;
+            break;
+          }
+        }
+        // بلا تطابق: نُقدّر السير من نتيجة lineToRow الاسترشادية لنكمل السلسلة
+        if (!matched) {
+          const d = Number(row.debitRaw || 0);
+          const c = Number(row.creditRaw || 0);
+          prev = prev - d + c;
+        }
+      }
+    }
+    out.push(row);
+  }
+  return { lines: out, opening: op };
+}
+
 export class OcrService {
   /** استخراج بنود كشف PDF — نص رقمي مباشر إن وُجد، وإلا OCR محلي للصور الممسوحة */
   async extractPdf(buffer: Buffer): Promise<OcrResult> {
@@ -198,62 +255,6 @@ export class OcrService {
     }
 
     type PdfPage = Awaited<ReturnType<typeof doc.getPage>>;
-
-    // أسطر → صفوف إرشادية للمراجعة (سطرا الافتتاحي والختامي ليسا بندين)
-    const parseAll = (raws: string[], conf: number | null, opts?: { requireDate?: boolean }) => {
-      const requireDate = opts?.requireDate ?? true;
-      const out: OcrLine[] = [];
-      let op: number | null = null;
-      let prev: number | null = null; // سلسلة الرصيد المجمع لكشوف التفصيل
-      for (const raw of raws) {
-        // ترويسات وتذييلات الكشف (تلفون/فاكس/طباعة/صفحة/عناوين/إجماليات) — ليست بنوداً أبداً
-        if (isHeaderLine(raw)) continue;
-        if (CLOSING_HINT.test(raw)) continue;
-        if (OPENING_HINT.test(raw)) {
-          const nums = (raw.match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
-          const nz = nums.filter((n) => n !== 0);
-          // الافتتاحي: رقم واحد، أو رقمين أحدهما صفر (عمودا مدين/دائن) — نأخذ غير الصفر
-          if (op == null && (nz.length === 1 || nums.length === 1)) op = Math.abs(nz[0] ?? nums[0]);
-          continue; // سطر الافتتاحي نفسه ليس بنداً مهما كان شكله
-        }
-        const row = lineToRow(raw, out.length + 1, conf);
-        if (!row) continue;
-        if (requireDate) {
-          // البند الحقيقي له تاريخ ومبلغ — ما عدا ذلك بقايا ترويسة/فواصل
-          if (!row.dateRaw || (!row.debitRaw && !row.creditRaw)) continue;
-          // سلسلة الرصيد الذاتية التصحيح: ثلاثية متتالية (مدين، دائن، رصيد) تحقق
-          // الرصيد = السابق − مدين + دائن — إثبات رياضي لا تخمين مهما اختلف ترتيب الأعمدة
-          if (prev == null && op != null) prev = op;
-          const dm = DATE_RE.exec(raw);
-          const withoutDate = dm ? raw.slice(0, dm.index) + ' ' + raw.slice(dm.index + dm[0].length) : raw;
-          const nums = (stripRefs(withoutDate).match(NUM_RE) ?? []).map(toNum).filter((n): n is number => n != null);
-          if (prev != null) {
-            let matched = false;
-            for (let i = 0; i + 2 < nums.length; i++) {
-              const d = nums[i];
-              const c = nums[i + 1];
-              const b = nums[i + 2];
-              if (d == null || c == null || b == null) break;
-              if (Math.abs(b - (prev - d + c)) < 0.005 || Math.abs(b - (prev + d - c)) < 0.005) {
-                row.debitRaw = d !== 0 ? String(Math.abs(d)) : '';
-                row.creditRaw = c !== 0 ? String(Math.abs(c)) : '';
-                prev = b;
-                matched = true;
-                break;
-              }
-            }
-            // بلا تطابق: نُقدّر السير من نتيجة lineToRow الاسترشادية لنكمل السلسلة
-            if (!matched) {
-              const d = Number(row.debitRaw || 0);
-              const c = Number(row.creditRaw || 0);
-              prev = prev - d + c;
-            }
-          }
-        }
-        out.push(row);
-      }
-      return { lines: out, opening: op };
-    };
 
     // جودة الصفحة: عدد البنود القابلة للاستخدام (مدين+دائن معاً عرف محاسبي مشروع وليس عيباً)
     const score = (ls: OcrLine[]) => ls.length;
@@ -331,5 +332,35 @@ export class OcrService {
     // eslint-disable-next-line no-console
     console.log('[OCR-DIAG]', usedOcr ? 'OCR' : 'TEXT', diag.join(' '), '· بنود:', lines.length);
     return { pages: doc.numPages, mode: usedOcr ? 'ocr' : 'text', opening, lines };
+  }
+
+  /** استخراج بنود كشف من صورة (PNG/JPG) — OCR محلي مباشر بنفس محرك PDF الممسوح.
+   *  لا توجد «صفحات» هنا — صورة واحدة تُمرَّر للعين الإلكترونية (Tesseract المضمّن)
+   *  ثم تُحلَّل بنفس منطق parseAll لضمان اتساق النتائج مع استخراج PDF. */
+  async extractImage(buffer: Buffer): Promise<OcrResult> {
+    const worker = await getWorker();
+    let recognized: { data: { text: string; confidence?: number } };
+    try {
+      recognized = await worker.recognize(buffer);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw ERR.VALIDATION([
+        { field: 'file', messageAr: `تعذرت قراءة الصورة — تأكد أنها صورة سليمة (PNG/JPG) غير تالفة. التفصيل: ${msg.slice(0, 80)}` },
+      ]);
+    }
+    const textRaw = recognized.data.text.split(/\r?\n/);
+    const conf = recognized.data.confidence ?? null;
+    const parsed = parseAll(textRaw, conf, { requireDate: true });
+    if (parsed.lines.length === 0) {
+      throw ERR.VALIDATION([
+        {
+          field: 'file',
+          messageAr: 'لم يُستخرج أي بند من الصورة — جودة الصورة منخفضة أو الإضاءة ضعيفة. أعد تصوير الكشف بوضوح وثبات أفضل (مستوٍ أفقياً، إضاءة جيدة، تركيز واضح) ثم ارفعه',
+        },
+      ]);
+    }
+    // eslint-disable-next-line no-console
+    console.log('[OCR-DIAG] IMAGE بنود:', parsed.lines.length, '· ثقة:', conf);
+    return { pages: 1, mode: 'ocr', opening: parsed.opening, lines: parsed.lines };
   }
 }

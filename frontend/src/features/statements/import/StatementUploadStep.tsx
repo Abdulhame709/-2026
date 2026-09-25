@@ -99,7 +99,7 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
     ocrStatementPdf(accountId, side, file)
       .then((draft) => {
         const rows = Array.isArray(draft?.lines) ? draft.lines : [];
-        if (rows.length === 0) throw new Error('لم يُستخرج أي بند من الملف — أعد تصدير الكشف من نظامك كـ PDF نصي أو Excel/CSV ثم ارفعه');
+        if (rows.length === 0) throw new Error('لم يُستخرج أي بند من الملف — أعد تصدير الكشف كـ PDF نصي أو Excel/CSV، أو أعد تصويره بوضوح أفضل ثم ارفعه');
         const mapped = rows.map((l) => ({
           lineNo: l.lineNo,
           dateRaw: l.dateRaw,
@@ -356,21 +356,21 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
       {!fileMeta && (
         <>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-            {SIDE_LABELS[side]} — ارفع ملف Excel (xlsx/xls) أو CSV — أو PDF (يُقرأ محلياً للمراجعة)
+            {SIDE_LABELS[side]} — ارفع ملف Excel (xlsx/xls) أو CSV — أو PDF/صورة (يُقرأ محلياً للمراجعة)
           </Typography.Paragraph>
           <Upload.Dragger
-            accept=".xlsx,.xls,.csv,.pdf"
+            accept=".xlsx,.xls,.csv,.pdf,.png,.jpg,.jpeg"
             showUploadList={false}
             multiple={false}
             disabled={parsing || !accountId}
             beforeUpload={(file) => {
               const ext = `.${(file.name.split('.').pop() ?? '').toLowerCase()}`;
-              if (ext === '.pdf') {
-                handlePdfOcr(file); // استيراد PDF محلي (M11) — مسودة مراجعة
+              if (ext === '.pdf' || ['.png', '.jpg', '.jpeg'].includes(ext)) {
+                handlePdfOcr(file); // استيراد PDF/صورة محلي (M11) — مسودة مراجعة
                 return false;
               }
               if (!['.xlsx', '.xls', '.csv'].includes(ext)) {
-                message.error('صيغة غير مدعومة — المسموح: Excel (xlsx/xls) أو CSV أو PDF');
+                message.error('صيغة غير مدعومة — المسموح: Excel (xlsx/xls) أو CSV أو PDF أو صورة (PNG/JPG)');
                 return Upload.LIST_IGNORE;
               }
               setOcrDraft(false);
@@ -384,7 +384,7 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
             </p>
             <p className="ant-upload-text">اسحب الملف هنا أو انقر للاختيار</p>
             <p className="ant-upload-hint">
-              المسموح: Excel (xlsx/xls) أو CSV — وPDF يُقرأ محلياً (طبقة نصية أو OCR) ثم تراجع بنوده قبل الاعتماد · يُفحص الملف تلقائياً (تواريخ، مبالغ، تسلسل الأرصدة) قبل الحفظ — FR-3.4
+              المسموح: Excel (xlsx/xls) أو CSV — وPDF/صورة يُقرأ محلياً (طبقة نصية أو OCR) ثم تراجع بنوده قبل الاعتماد · يُفحص الملف تلقائياً (تواريخ، مبالغ، تسلسل الأرصدة) قبل الحفظ — FR-3.4
             </p>
           </Upload.Dragger>
           <Space wrap style={{ marginTop: 12 }}>

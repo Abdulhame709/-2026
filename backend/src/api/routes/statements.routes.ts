@@ -105,7 +105,7 @@ export function statementsRoutes(svc: StatementService, matchingSvc: MatchingSer
     res.status(201).json(result);
   });
 
-  // === استيراد PDF (Module 11): استخراج محلي بالكامل — مسودة مراجعة إلزامية قبل الاعتماد ===
+  // === استيراد PDF/صورة (Module 11): استخراج محلي بالكامل — مسودة مراجعة إلزامية قبل الاعتماد ===
   router.post('/ocr', requireAuth, canWrite, upload.single('file'), async (req: Request, res: Response) => {
     const { file } = req as Request & { file?: Express.Multer.File };
     if (!file) {
@@ -113,14 +113,20 @@ export function statementsRoutes(svc: StatementService, matchingSvc: MatchingSer
       return;
     }
     const ext = (file.originalname.toLowerCase().split('.').pop() ?? '');
-    if (ext !== 'pdf') {
-      res.status(422).json({
-        error: { code: 'VALIDATION_FAILED', messageAr: 'هذا المسار لكشوف PDF فقط — لملفات Excel/CSV استخدم نافذة الرفع العادية' },
-      });
+    // PDF أو صورة (PNG/JPG) — كلاهما يُعالَج محلياً للمراجعة (M11)
+    if (ext === 'pdf') {
+      const draft = await ocrSvc.extractPdf(file.buffer);
+      res.status(201).json({ draft });
       return;
     }
-    const draft = await ocrSvc.extractPdf(file.buffer);
-    res.status(201).json({ draft });
+    if (['png', 'jpg', 'jpeg'].includes(ext)) {
+      const draft = await ocrSvc.extractImage(file.buffer);
+      res.status(201).json({ draft });
+      return;
+    }
+    res.status(422).json({
+      error: { code: 'VALIDATION_FAILED', messageAr: 'هذا المسار لكشوف PDF أو الصور (PNG/JPG) فقط — لملفات Excel/CSV استخدم نافذة الرفع العادية' },
+    });
   });
 
   router.post('/manual', requireAuth, canWrite, async (req: Request, res: Response) => {
