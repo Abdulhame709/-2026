@@ -3,8 +3,8 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
-import { createCanvas } from '@napi-rs/canvas';
 import * as XLSX from 'xlsx';
 import { OcrService, normalizeConfidence, parseOcrLines } from '../dist/application/ocr.service.js';
 import { StatementService } from '../dist/application/statement.service.js';
@@ -161,16 +161,13 @@ test('PDF refuses a page with no readable transactions rather than returning a p
 });
 
 test('a real image OCR run reads dates, amounts and confidence locally', { timeout: 60000 }, async () => {
-  const canvas = createCanvas(1800, 280);
-  const context = canvas.getContext('2d');
-  context.fillStyle = 'white';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = 'black';
-  context.font = '48px Arial';
-  context.fillText('2026-02-01 Invoice for office supplies 100.00 0.00', 30, 150);
+  // صورة ثابتة البايتات (scripts/generate-ocr-fixture.mjs) بدل رسم نص بخط النظام:
+  // رسم النص على Linux قد ينتج بايتات مختلفة (خط بديل/بلا خط) فلا يقرأها المحرك.
+  const fixturePath = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'ocr-statement.png');
+  const png = await readFile(fixturePath);
   const service = new OcrService();
   try {
-    const draft = await service.extractImage(canvas.toBuffer('image/png'), 'png');
+    const draft = await service.extractImage(png, 'png');
     assert.equal(draft.mode, 'ocr');
     assert.equal(draft.lines[0].dateRaw, '2026-02-01');
     assert.equal(draft.lines[0].debitRaw, '100');
