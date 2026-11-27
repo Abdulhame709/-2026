@@ -35,8 +35,8 @@ export function CompanyTab({
 
   /** رفع الشعار فعلياً إلى الخادم (M9) — مع فحص الصيغة والحجم قبل الإرسال */
   const doUploadLogo = (file: File) => {
-    if (!['image/png', 'image/jpeg', 'image/svg+xml'].includes(file.type)) {
-      message.error('صيغة غير مدعومة — المسموح PNG أو JPG أو SVG (يفضَّل PNG بخلفية شفافة)');
+    if (!['image/png', 'image/jpeg'].includes(file.type)) {
+      message.error('صيغة غير مدعومة — المسموح PNG أو JPG');
       return;
     }
     if (file.size > 300 * 1024) {
@@ -118,7 +118,7 @@ export function CompanyTab({
                 />
               )}
               <Upload
-                accept="image/png,image/jpeg,image/svg+xml"
+                accept="image/png,image/jpeg"
                 showUploadList={false}
                 maxCount={1}
                 disabled={logoBusy}
@@ -128,7 +128,7 @@ export function CompanyTab({
                 }}
               >
                 <Button icon={settings.logoFileName ? <PictureOutlined aria-hidden="true" /> : <UploadOutlined aria-hidden="true" />} loading={logoBusy}>
-                  {settings.logoFileName ? 'تغيير الشعار…' : 'رفع شعار (PNG/JPG/SVG حتى 300KB)'}
+                  {settings.logoFileName ? 'تغيير الشعار…' : 'رفع شعار (PNG/JPG حتى 300KB)'}
                 </Button>
               </Upload>
               {settings.logoFileName && (

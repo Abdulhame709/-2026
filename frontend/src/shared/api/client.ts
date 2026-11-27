@@ -1,6 +1,6 @@
 /**
  * عميل API الموحد — نفس الأصل عبر بروكسي vite (/api → الخادم:3000).
- * الكوكي httpOnly يُرسل تلقائياً (نفس الأصل) — لا تخزين للهوية في JS إطلاقاً.
+ * الكوكي httpOnly يُرسل تلقائياً (نفس الأصل)؛ Bearer اختياري ويُحفظ بذاكرة الوحدة فقط.
  */
 
 export interface ApiErrorShape {
@@ -35,54 +35,21 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * رمز الجلسة البديل (سياق الإطارات المقيّدة فقط): إن رفض المتصفح كوكي الجلسة
- * داخل iframe يعمل النظام عبر ترويسة Bearer. التخزين بحراسة (storage قد يُمنع).
- */
-const TOKEN_KEY = 'recon.sessionToken';
-// ثلاث طبقات للاحتفاظ برمز الجلسة — الإطارات المقيّدة قد تمنع التخزين،
-// وإعادة تحميل الوحدات (HMR) تجدد ذاكرة الوحدة، لذلك النافذة العامة أولاً:
 let memoryToken: string | null = null;
-
-function winToken(): string | null | undefined {
-  return (window as unknown as { __reconSessionToken?: string | null }).__reconSessionToken;
-}
 
 export function storeSessionToken(token: string | null): void {
   memoryToken = token;
-  (window as unknown as { __reconSessionToken?: string | null }).__reconSessionToken = token;
-  try {
-    if (token) sessionStorage.setItem(TOKEN_KEY, token);
-    else sessionStorage.removeItem(TOKEN_KEY);
-  } catch {
-    /* التخزين ممنوع — النافذة والذاكرة تعملان */
-  }
 }
 
 function readSessionToken(): string | null {
-  return winToken() ?? memoryToken ?? (() => {
-    try {
-      return sessionStorage.getItem(TOKEN_KEY);
-    } catch {
-      return null;
-    }
-  })();
+  return memoryToken;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = readSessionToken();
-  // القنوات الثلاث معاً: الكوكي (تلقائي) + ترويسة Bearer + ?sid= في الرابط.
-  // سبب sid: بوابة معاينة المنصة تَنزِع ترويسة Authorization أثناء العبور
-  // (مُثبت بسجل الخادم: الطلب يصل bearer=لا رغم إرفاق المتصفح له) —
-  // معامل الاستعلام الوحيد الذي لا تلمسه أي بوابة. الرابط يظهر بسجلات
-  // الوسطاء: مقبول في المعاينة، والإنتاج الداخلي يعتمد الكوكي وحده.
-  const url =
-    token
-      ? `${path}${path.includes('?') ? '&' : '?'}sid=${encodeURIComponent(token)}`
-      : path;
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(path, {
       credentials: 'same-origin',
       headers: {
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
@@ -130,28 +97,50 @@ export const api = {
   delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
 };
 
-/**
- * رفع ملف (multipart/form-data) بنفس قنوات الجلسة الثلاث — Content-Type يتركه
- * المتصفح يضبطه تلقائياً مع boundary الـ form (لا تُحدده يدوياً وإلا انكسر الطلب).
- */
-/** رابط تنزيل مباشر (window.open) بنفس قناة sid — للملفات كنسخ الاحتياطي */
+/** رابط تنزيل مباشر يعتمد على كوكي الجلسة؛ لا تُوضع رموز الجلسة في URL. */
 export function fileUrl(path: string): string {
-  const token = readSessionToken();
-  return token ? `${path}${path.includes('?') ? '&' : '?'}sid=${encodeURIComponent(token)}` : path;
+  return path;
 }
 
+export async function openFile(path: string, filename?: string): Promise<void> {
+  const token = readSessionToken();
+  if (!token) {
+    window.open(path, '_blank', 'noopener');
+    return;
+  }
+  const tab = filename ? null : window.open('about:blank', '_blank');
+  if (tab) tab.opener = null;
+  try {
+    const response = await fetch(path, {
+      credentials: 'same-origin',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new ApiError(response.status, 'DOWNLOAD_FAILED', 'تعذر تنزيل الملف');
+    const objectUrl = URL.createObjectURL(await response.blob());
+    if (filename || !tab) {
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = filename ?? 'report.pdf';
+      link.click();
+    } else {
+      tab.location.href = objectUrl;
+    }
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 300_000);
+  } catch (error) {
+    tab?.close();
+    throw error;
+  }
+}
+
+/** رفع multipart؛ يضبط المتصفح Content-Type مع boundary تلقائياً. */
 export async function uploadFile<T>(path: string, file: File, fields: Record<string, string>): Promise<T> {
   const token = readSessionToken();
-  const url =
-    token
-      ? `${path}${path.includes('?') ? '&' : '?'}sid=${encodeURIComponent(token)}`
-      : path;
   const form = new FormData();
   form.append('file', file);
   for (const [key, value] of Object.entries(fields)) form.append(key, value);
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(path, {
       method: 'POST',
       credentials: 'same-origin',
       headers: token ? { Authorization: `Bearer ${token}` } : {},

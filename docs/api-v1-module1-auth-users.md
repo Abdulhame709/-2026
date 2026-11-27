@@ -32,7 +32,7 @@
 - سلوك الحماية: **قفل بعد 5 محاولات فاشلة لمدة 5 دقائق** (حتى بالمرور الصحيح).
   المحاولة الناجحة تصفّر العداد.
 - `200` → `{user: PublicUser}` + `Set-Cookie: recon_session=…; HttpOnly; SameSite=Strict`
-- `401 INVALID_CREDENTIALS` · `423 ACCOUNT_LOCKED {details:{retryAfterSeconds}}` · `403 ACCOUNT_DISABLED` · `422 VALIDATION_FAILED`
+- `401 INVALID_CREDENTIALS` · `401 ACCOUNT_LOCKED {details:{retryAfterSeconds}}` · `403 ACCOUNT_DISABLED` · `422 VALIDATION_FAILED`
 
 ### `POST /auth/logout` (جلسة صالحة)
 - `204` — يُبطل الجلسة في قاعدة البيانات ويمسح الكوكي.
@@ -41,8 +41,8 @@
 - `200` → `{user: PublicUser}` — يستخدمه الـ frontend عند تحميل الصفحة بدل تخزين المستخدم.
 
 ### `POST /auth/change-password` (جلسة صالحة)
-- المدخلات: `{currentPassword, newPassword}` — الجديدة: 8+ أحرف، حرف ورقم، تختلف عن الحالية.
-- `200` → `{user}` (و`mustChangePassword` يصفَّر) · `400 WRONG_PASSWORD`
+- المدخلات: `{currentPassword, newPassword}` — الجديدة: 12+ حرفاً، حرف ورقم، تختلف عن الحالية.
+- `200` → `{user}` (و`mustChangePassword` يصفَّر؛ تُبطل بقية الجلسات في المعاملة نفسها) · `422 WRONG_PASSWORD`
 
 ### `PublicUser`
 ```json
@@ -54,7 +54,7 @@
 
 ### `GET /users` → `{users: PublicUser[]}`
 ### `POST /users` `201`
-- `{username (a-z0-9._-، 3+), fullName (2+), role (admin|reconciler|viewer), initialPassword (8+)}`
+- `{username (a-z0-9._-، 3+), fullName (2+), role (admin|reconciler|viewer), initialPassword (12+، حرف ورقم)}`
 - `409 USERNAME_TAKEN`
 - المستخدم الجديد يبدأ بـ `mustChangePassword: true`.
 
@@ -64,7 +64,7 @@
 
 ### `POST /users/{id}/activate` → `200 {user}`
 ### `POST /users/{id}/force-password-change` → `204`
-- يُجبر المستخدم على تغيير مروره في الدخول القادم (كما في شاشة Users بالـ frontend).
+- يُجبر المستخدم على تغيير مروره وتُبطل جميع جلساته فوراً. لا يستبدل هذا الأمر كلمة مرور مسربة؛ استخدم `docs/CREDENTIAL-ROTATION.md` لتدويرها.
 
 ## 3) سجل التدقيق (Admin فقط — قراءة فقط)
 
@@ -80,8 +80,7 @@
    المهمة طويلة (مطابقة كشف كامل) لا تُقطع منتصف العمل.
 3. **إبطال فوري عند التعطيل**: قاعدة "الأمان أولاً" — التعطيل يموت الجلسات في نفس الطلب.
 4. **قفل القاعدة لا الذاكرة**: العدادات والقفل في جدول users نفسه — يعمل مع عدة عمليات خادم مستقبلاً.
-5. **بذور المعاينة** (`npm run db:seed`): admin/Admin@2026، reconciler/Recon@2026، viewer/Viewer@2026
-   بـ `mustChangePassword: false` لتثبيت العرض. في الإنتاج يُنشأ admin الأول بإجبار تغيير المرور.
+5. **بذور التطوير** (`npm run db:seed`): تتطلب `NODE_ENV=development` وكلمات مرور فريدة من متغيرات `SEED_*_PASSWORD`؛ جميعها تبدأ بـ `mustChangePassword: true`، ويمنع الخادم عمليات الأعمال حتى تغييرها.
 
 ## نتائج اختبار الوحدة (curl — 6 سبتمبر 2026)
 

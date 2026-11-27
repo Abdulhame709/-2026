@@ -6,7 +6,6 @@ import { BrandLogo } from '@/shared/components/BrandLogo';
 import { LanguageSwitch } from '@/shared/components/LanguageSwitch';
 import { useAuth } from '@/app/AuthContext';
 import { formatRemaining, lockSecondsFrom } from './authService';
-import { DEMO_ACCOUNTS, ROLE_LABELS } from './mockUsers';
 
 /**
  * شاشة تسجيل الدخول — وثيقة التصميم stage-2c §1
@@ -153,27 +152,6 @@ export function LoginPage() {
             </Button>
           </Form.Item>
         </Form>
-
-        {/* حسابات المعاينة — نفس المستخدمين المزروعين في قاعدة التطوير */}
-        <details className="login-demo">
-          <summary>حسابات المعاينة (بيئة التطوير)</summary>
-          <ul>
-            {DEMO_ACCOUNTS.map((acc) => (
-              <li key={acc.username}>
-                <button
-                  type="button"
-                  className="login-demo-account"
-                  onClick={() => {
-                    form.setFieldsValue({ username: acc.username, password: acc.password });
-                  }}
-                  aria-label={`تعبئة بيانات ${ROLE_LABELS[acc.role]} ${acc.fullName}`}
-                >
-                  <strong>{ROLE_LABELS[acc.role]}</strong> — {acc.username} / {acc.password}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </details>
 
         <footer className="login-footer">
           <LanguageSwitch />

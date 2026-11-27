@@ -4,3 +4,6 @@ dist
 .pgdata
 logs
 storage/
+.env
+.env.*
+*.dpapi

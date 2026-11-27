@@ -69,7 +69,7 @@ export function ChangePasswordModal({ open, onClose }: { open: boolean; onClose:
       width={440}
     >
       <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-        8 أحرف على الأقل، وتحتوي حرفاً ورقماً، وتختلف عن الحالية.
+        12 حرفاً على الأقل، وتحتوي حرفاً ورقماً، وتختلف عن الحالية.
       </Typography.Paragraph>
       <Form<Values> form={form} layout="vertical">
         <Form.Item name="currentPassword" label="كلمة المرور الحالية" rules={[{ required: true, message: 'أدخل كلمة المرور الحالية' }]}>

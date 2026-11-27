@@ -11,15 +11,17 @@ export const loginSchema = z.object({
 });
 export type LoginInput = z.infer<typeof loginSchema>;
 
+export const securePasswordSchema = z
+  .string()
+  .min(12, 'كلمة المرور 12 حرفاً على الأقل')
+  .max(100)
+  .regex(/[A-Za-z]/, 'يجب أن تحتوي على حرف واحد على الأقل')
+  .regex(/\d/, 'يجب أن تحتوي على رقم واحد على الأقل');
+
 export const changePasswordSchema = z
   .object({
     currentPassword: z.string().min(1, 'أدخل كلمة المرور الحالية').max(100),
-    newPassword: z
-      .string()
-      .min(8, 'كلمة المرور الجديدة 8 أحرف على الأقل')
-      .max(100)
-      .regex(/[A-Za-z]/, 'يجب أن تحتوي على حرف واحد على الأقل')
-      .regex(/\d/, 'يجب أن تحتوي على رقم واحد على الأقل'),
+    newPassword: securePasswordSchema,
   })
   .refine((v) => v.currentPassword !== v.newPassword, {
     message: 'كلمة المرور الجديدة يجب أن تختلف عن الحالية',
@@ -37,9 +39,11 @@ export const createUserSchema = z.object({
     .min(3, 'اسم المستخدم قصير جداً')
     .max(30),
   role: z.enum(['admin', 'reconciler', 'viewer']),
-  initialPassword: z.string().min(8, '8 أحرف على الأقل').max(100),
+  initialPassword: securePasswordSchema,
 });
 export type CreateUserInput = z.infer<typeof createUserSchema>;
+
+export const updateUserSchema = createUserSchema.pick({ fullName: true, username: true, role: true });
 
 export const setActiveSchema = z.object({ isActive: z.boolean() });
 export const listAuditSchema = z.object({

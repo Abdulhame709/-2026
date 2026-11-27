@@ -1,19 +1,23 @@
 /**
- * بذور التطوير — المستخدمون الثلاثة بالأدوار (كلماتهم معروفة للمعاينة فقط،
- * لا تُستخدم في الإنتاج؛ الإنتاج يبدأ من admin أول سجل + إجبار تغيير المرور).
- * التشغيل: npm run db:seed (مضمن — لا يكرر الموجودين).
+ * بذور تطوير اختيارية؛ لا تُنشئ حسابات إن كانت بيئة التشغيل إنتاجاً.
+ * يجب توفير كلمات مرور فريدة عبر متغيرات البيئة قبل التشغيل.
  */
 import { pool } from '../src/infrastructure/db/pool.js';
 import { UsersRepository, hashPassword } from '../src/infrastructure/repositories/users.repository.js';
+import { securePasswordSchema } from '../src/application/auth.dto.js';
 import type { UserRole } from '../src/domain/user.js';
 
-const SEED_USERS: Array<{ username: string; password: string; fullName: string; role: UserRole }> = [
-  { username: 'admin', password: 'Admin@2026', fullName: 'أحمد المدير', role: 'admin' },
-  { username: 'reconciler', password: 'Recon@2026', fullName: 'سامي المحاسب', role: 'reconciler' },
-  { username: 'viewer', password: 'Viewer@2026', fullName: 'منى المُطالعة', role: 'viewer' },
+const SEED_USERS: Array<{ username: string; passwordEnv: string; fullName: string; role: UserRole }> = [
+  { username: 'admin', passwordEnv: 'SEED_ADMIN_PASSWORD', fullName: 'أحمد المدير', role: 'admin' },
+  { username: 'reconciler', passwordEnv: 'SEED_RECONCILER_PASSWORD', fullName: 'سامي المحاسب', role: 'reconciler' },
+  { username: 'viewer', passwordEnv: 'SEED_VIEWER_PASSWORD', fullName: 'منى المُطالعة', role: 'viewer' },
 ];
 
 async function seedUsers() {
+  const passwords = SEED_USERS.map((user) => process.env[user.passwordEnv]);
+  if (passwords.some((password) => !securePasswordSchema.safeParse(password).success) || new Set(passwords).size !== passwords.length) {
+    throw new Error('وفّر كلمات مرور فريدة من 12 حرفاً على الأقل تحتوي حروفاً وأرقاماً: SEED_ADMIN_PASSWORD وSEED_RECONCILER_PASSWORD وSEED_VIEWER_PASSWORD');
+  }
   const repo = new UsersRepository(pool);
   for (const u of SEED_USERS) {
     const existing = await repo.findByUsername(u.username);
@@ -25,9 +29,9 @@ async function seedUsers() {
       username: u.username,
       fullName: u.fullName,
       role: u.role,
-      passwordHash: await hashPassword(u.password),
+      passwordHash: await hashPassword(process.env[u.passwordEnv]!),
       createdBy: 0,
-      mustChangePassword: false, // بذور معاينة — ثبات كلمات المرور للعرض
+      mustChangePassword: true,
     });
     console.log(`✓ أُنشئ: ${u.username} (${u.role})`);
   }
@@ -78,6 +82,7 @@ async function seedPartners() {
 }
 
 async function main() {
+  if (process.env.NODE_ENV !== 'development') throw new Error('بذور التطوير تتطلب NODE_ENV=development');
   await seedUsers();
   await seedPartners();
 }
