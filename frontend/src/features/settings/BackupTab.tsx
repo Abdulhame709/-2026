@@ -7,6 +7,7 @@ import {
   createBackup,
   deleteBackup,
   downloadBackup,
+  encryptLegacyBackup,
   formatSize,
   listBackups,
   restoreBackup,
@@ -15,7 +16,7 @@ import type { BackupInfo } from './settingsClient';
 
 /**
  * تبويب النسخ الاحتياطي — حقيقي (Module 6، محلي 100%):
- * نسخة الآن = ملف JSON واحد بكل البيانات (يُنزَّل ويُحفظ خارجياً — R6) ·
+ * نسخة الآن = ملف مشفّر لجداول القاعدة والملفات المرفوعة (يُحفظ خارجياً — R6) ·
  * الاسترجاع بأخطر حافز: نافذة حمراء + كتابة كلمة «استرجاع» حرفياً.
  */
 
@@ -38,7 +39,7 @@ export function BackupTab() {
     setLoading(true);
     listBackups()
       .then(setBackups)
-      .catch(() => message.error('تعذر جلب قائمة النسخ'))
+      .catch((error: { messageAr?: string }) => message.error(error?.messageAr ?? 'تعذر جلب قائمة النسخ'))
       .finally(() => setLoading(false));
   }, [isAdmin, message]);
 
@@ -48,7 +49,7 @@ export function BackupTab() {
     setRunning(true);
     createBackup()
       .then((b) => {
-        message.success(`أُنشئت النسخة (${formatSize(b.sizeBytes)}) — نزّلها واحفظها على قرص خارجي بصفة دورية (R6)`);
+        message.success(`أُنشئت نسخة القاعدة و${b.fileCount} ملف (${formatSize(b.sizeBytes)}) — نزّلها واحفظها خارج الجهاز`);
         load();
       })
       .catch((e: { messageAr?: string; message?: string }) => message.error(e?.messageAr ?? 'فشل إنشاء النسخة'))
@@ -77,7 +78,7 @@ export function BackupTab() {
       title: 'النسخة',
       dataIndex: 'name',
       key: 'name',
-      render: (name: string) => <Typography.Text className="financial-numbers" style={{ fontSize: 12 }}>{name}</Typography.Text>,
+      render: (name: string, backup) => <><Typography.Text className="financial-numbers" style={{ fontSize: 12 }}>{name}</Typography.Text>{' '}{!backup.encrypted && <Tag color="warning">غير مشفرة</Tag>}{backup.readable && backup.encrypted && !backup.includesUploads && <Tag color="warning">قاعدة فقط</Tag>}{backup.includesUploads && <Tag color="success">{backup.fileCount} ملف</Tag>}{!backup.readable && <Tag color="error">تعذر التحقق</Tag>}</>,
     },
     {
       title: 'أُنشئت',
@@ -97,11 +98,11 @@ export function BackupTab() {
     {
       title: 'محتوى مختصر',
       key: 'counts',
-      render: (_, b) => (
+      render: (_, b) => b.readable ? (
         <Typography.Text type="secondary" style={{ fontSize: 11 }}>
           جلسات {b.counts.reconciliation_sessions ?? 0} · كشوف {b.counts.statements ?? 0} · موردين {b.counts.partners ?? 0}
         </Typography.Text>
-      ),
+      ) : 'غير متاح',
     },
     {
       title: 'إجراءات',
@@ -109,16 +110,15 @@ export function BackupTab() {
       width: 220,
       render: (_, b) => (
         <>
-          <Button size="small" icon={<DownloadOutlined aria-hidden="true" />} onClick={() => downloadBackup(b.name)}>
-            تنزيل
-          </Button>{' '}
-          <Button size="small" danger icon={<RestOutlined aria-hidden="true" />} onClick={() => { setRestoreTarget(b); setConfirmText(''); }}>
-            استرجاع
-          </Button>{' '}
+          {b.encrypted ? <>
+            <Button size="small" icon={<DownloadOutlined aria-hidden="true" />} onClick={() => downloadBackup(b.name).catch(() => message.error('تعذر تنزيل النسخة'))}>تنزيل</Button>{' '}
+            <Button size="small" danger disabled={!b.readable} icon={<RestOutlined aria-hidden="true" />} onClick={() => { setRestoreTarget(b); setConfirmText(''); }}>استرجاع</Button>{' '}
+          </> : <Button size="small" onClick={() => encryptLegacyBackup(b.name).then(() => { message.success('أنشئت نسخة مشفرة؛ الملف القديم باقٍ حتى تتحقق من الاستعادة'); load(); }).catch((error: { messageAr?: string }) => message.error(error?.messageAr ?? 'فشل تشفير النسخة'))}>تشفير النسخة القديمة</Button>}{' '}
           <Button
             size="small"
             type="text"
             icon={<DeleteOutlined aria-hidden="true" />}
+            disabled={!b.encrypted}
             aria-label={`حذف ${b.name}`}
             onClick={() =>
               modal.confirm({
@@ -142,7 +142,7 @@ export function BackupTab() {
     },
   ];
 
-  const last = backups[0];
+  const last = backups.find((backup) => backup.encrypted && backup.readable && backup.includesUploads);
 
   return (
     <div className="backup-tab">
@@ -153,10 +153,14 @@ export function BackupTab() {
         message={
           last
             ? `آخر نسخة: ${last.createdAt.slice(0, 16).replace('T', ' ')} (${formatSize(last.sizeBytes)})`
-            : 'لا توجد أي نسخة احتياطية بعد — أنشئ الأولى الآن'
+            : 'لا توجد نسخة مشفرة تجمع القاعدة والملفات — اضبط المفتاح ثم أنشئ نسخة جديدة'
         }
-        description="نسخة النظام ملف واحد محلي (JSON) يشمل كل البيانات. احفظ نسخة على قرص خارجي بصفة دورية — النسخ على نفس الجهاز لا تحمي من عطل القرص (R6)."
+        description="النسخ الجديدة تشمل جداول القاعدة والملفات المرفوعة حتى 256 ميغابايت. احفظ ملف النسخة ومفتاحها منفصلين خارج الجهاز، واختبر الاستعادة على بيئة معزولة."
       />
+
+      {backups.some((backup) => !backup.encrypted) && <Alert type="warning" showIcon message="توجد نسخ JSON قديمة غير مشفرة" description="تشفيرها لا يضيف الملفات المرفوعة إليها؛ أنشئ نسخة جديدة شاملة، ثم اختبرها قبل إزالة الأصل القديم يدوياً وبأمان." style={{ marginTop: 12 }} />}
+      {backups.some((backup) => backup.encrypted && backup.readable && !backup.includesUploads) && <Alert type="warning" showIcon message="توجد نسخ قديمة للقاعدة فقط" description="هذه النسخ لا تحمل الملفات الأصلية. لن تُستعاد إلا إذا كانت الملفات المحلية المرتبطة بها موجودة وبصماتها صحيحة؛ أنشئ نسخة جديدة شاملة." style={{ marginTop: 12 }} />}
+      {backups.some((backup) => !backup.readable) && <Alert type="error" showIcon message="تعذر التحقق من بعض النسخ" description="قد يكون المفتاح خاطئاً أو الملفات تالفة. لا تستعد هذه النسخ، واحتفظ بنسخة منها للتحقيق قبل حذفها." style={{ marginTop: 12 }} />}
 
       <div style={{ margin: '16px 0' }}>
         <Button type="primary" icon={<CloudUploadOutlined aria-hidden="true" />} loading={running} onClick={runBackup}>
@@ -190,7 +194,12 @@ export function BackupTab() {
           الاسترجاع لا يُتراجع عنه.
         </Typography.Paragraph>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          تأكد من وجود نسخة أحدث من هذه، ومن أن المستخدمين آخرين سيعيدون تسجيل الدخول.
+          تأكد من وجود نسخة أحدث من هذه؛ قد تعيد النسخة كلمات مرور وحسابات قديمة، ومنها حسابات سبق تعطيلها. راجع الحسابات فور الاستعادة، وسيعيد المستخدمون تسجيل الدخول.
+        </Typography.Paragraph>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          {restoreTarget?.includesUploads
+            ? 'ستُنسخ الملفات من داخل النسخة المشفرة إلى أسماء جديدة قبل تبديل القاعدة؛ الملفات القديمة تبقى على القرص حفاظاً على السلامة.'
+            : 'هذه نسخة قديمة للقاعدة فقط؛ لن تُستعاد إلا إذا كانت أصول الملفات المشار إليها ما زالت موجودة على هذا الجهاز.'}
         </Typography.Paragraph>
         <Input
           value={confirmText}

@@ -1,4 +1,4 @@
-import { api, fileUrl, uploadFile} from '@/shared/api/client';
+import { api, fileUrl, openFile, uploadFile } from '@/shared/api/client';
 import type { UserRoleName } from '@/features/auth/roles';
 
 /**
@@ -42,7 +42,7 @@ export interface CompanySettings {
   numerals?: 'latin' | 'arabic_indic';
 }
 
-/** رفع الشعار محلياً (أدمن) — PNG/JPG/SVG حتى 300KB */
+/** رفع الشعار محلياً (أدمن) — PNG/JPG حتى 300KB */
 export const uploadCompanyLogo = (file: File) =>
   uploadFile<{ company: CompanySettings }>('/api/v1/settings/company/logo', file, {});
 
@@ -56,6 +56,10 @@ export interface BackupInfo {
   sizeBytes: number;
   createdBy: string;
   counts: Record<string, number>;
+  encrypted: boolean;
+  readable: boolean;
+  includesUploads: boolean;
+  fileCount: number;
 }
 
 /** سجل تدقيق كما تعرضه شاشة السجل (مُحوَّل من جواب الخادم) */
@@ -166,16 +170,17 @@ export const listBackups = () =>
 export const createBackup = () =>
   api.post<{ backup: BackupInfo }>('/api/v1/backups').then((r) => r.backup);
 
+export const encryptLegacyBackup = (name: string) =>
+  api.post<{ backup: BackupInfo }>(`/api/v1/backups/${encodeURIComponent(name)}/encrypt`).then((r) => r.backup);
+
 export const restoreBackup = (name: string) =>
   api.post<{ restored: string; counts: Record<string, number> }>(`/api/v1/backups/${encodeURIComponent(name)}/restore`);
 
 export const deleteBackup = (name: string) =>
   api.delete<void>(`/api/v1/backups/${encodeURIComponent(name)}`);
 
-/** تنزيل النسخة — window.open بنفس قناة الجلسة */
-export const downloadBackup = (name: string): void => {
-  window.open(fileUrl(`/api/v1/backups/${encodeURIComponent(name)}/download`), '_blank');
-};
+export const downloadBackup = (name: string): Promise<void> =>
+  openFile(`/api/v1/backups/${encodeURIComponent(name)}/download`, name);
 
 /** حجم مقروء */
 export const formatSize = (bytes: number): string =>
