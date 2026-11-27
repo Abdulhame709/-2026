@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { ERR } from '../domain/errors.js';
@@ -7,8 +7,18 @@ import type { SessionsRepository } from '../infrastructure/repositories/reconcil
 import type { TemplatesRepository } from '../infrastructure/repositories/templates.repository.js';
 import type { StatementsRepository, StatementLineInput } from '../infrastructure/repositories/statements.repository.js';
 import type { AuditRepository } from '../infrastructure/repositories/audit.repository.js';
-import { parseAmount, parseDate, parseStatementFile } from '../infrastructure/parsing/statementParser.js';
+import {
+  FIELD_KEYS,
+  parseAmount,
+  parseDate,
+  parseStatementFile,
+  readStatementWorkbook,
+  type FieldKey,
+  type StatementSide,
+} from '../infrastructure/parsing/statementParser.js';
 import type { RawLine } from '../infrastructure/parsing/statementParser.js';
+import { detectColumnMapping, pickStatementSheet } from '../infrastructure/parsing/columnMapping.js';
+import type { OcrResult } from './ocr.service.js';
 import {
   dropPreview,
   getPreview,
@@ -34,6 +44,15 @@ interface ResolvedTemplate {
   thousandSep: string;
 }
 
+export interface UploadMappingInput {
+  mapping: Record<string, string> | null;
+  headerRows: number | null;
+  decimalSep: string | null;
+  thousandSep: string | null;
+  saveTemplate: { name: string; isDefault: boolean } | null;
+}
+
+/** قالب احتياطي أخير إن فشل التعرّف التلقائي — لا يُستخدم إلا لرسالة خطأ واضحة */
 const AUTO_TEMPLATE: ResolvedTemplate = {
   id: null,
   headerRows: 1,
@@ -43,6 +62,44 @@ const AUTO_TEMPLATE: ResolvedTemplate = {
   thousandSep: ',',
 };
 
+const DEFAULT_DATE_FORMATS = ['YYYY-MM-DD', 'DD/MM/YYYY', 'DD-MM-YYYY', 'YYYY/MM/DD'];
+
+/** تحقق خريطة الأعمدة القادمة من الواجهة: حقول معروفة، أحرف فريدة، تاريخ + مصدر مبلغ */
+function normalizeMapping(input: Record<string, string>): Record<string, string> {
+  const mapping: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (const key of FIELD_KEYS) {
+    const raw = input[key];
+    if (!raw) continue;
+    const letter = String(raw).trim().toUpperCase();
+    if (!/^[A-Z]{1,2}$/.test(letter)) {
+      throw ERR.VALIDATION([{ field: 'mapping', messageAr: `عمود غير صالح للحقل «${key}» — استخدم حرف عمود مثل A أو F` }]);
+    }
+    if (seen.has(letter)) {
+      throw ERR.VALIDATION([{ field: 'mapping', messageAr: `العمود ${letter} معيّن لأكثر من حقل — كل عمود لحقل واحد فقط` }]);
+    }
+    seen.add(letter);
+    mapping[key] = letter;
+  }
+  if (!mapping.date) {
+    throw ERR.VALIDATION([{ field: 'mapping', messageAr: 'عيّن عمود التاريخ قبل المتابعة' }]);
+  }
+  if (!mapping.debit && !mapping.credit && !mapping.amount && !mapping.balance) {
+    throw ERR.VALIDATION([{ field: 'mapping', messageAr: 'عيّن عمود مدين أو دائن أو مبلغ — لا يكفي التاريخ والبيان' }]);
+  }
+  return mapping;
+}
+
+function usableMapping(detection: { mapping: Partial<Record<FieldKey, string>> }): Record<string, string> | null {
+  const mapping: Record<string, string> = {};
+  for (const [key, value] of Object.entries(detection.mapping)) {
+    if (value) mapping[key] = value;
+  }
+  if (!mapping.date) return null;
+  if (!mapping.debit && !mapping.credit && !mapping.amount && !mapping.balance) return null;
+  return mapping;
+}
+
 export class StatementService {
   constructor(
     private readonly accounts: AccountsRepository,
@@ -50,7 +107,17 @@ export class StatementService {
     private readonly statements: StatementsRepository,
     private readonly audit: AuditRepository,
     private readonly sessions: SessionsRepository,
+    private readonly uploadDir = UPLOAD_DIR,
   ) {}
+
+  private async saveSourceFile(file: { buffer: Buffer; originalname: string; mimetype: string; size: number }) {
+    await mkdir(this.uploadDir, { recursive: true });
+    const sha256 = createHash('sha256').update(file.buffer).digest('hex');
+    const storedName = `${randomUUID()}-${sha256.slice(0, 12)}-${file.originalname.replace(/[^\w.\-]/g, '_').slice(-100)}`;
+    const storedPath = path.join(this.uploadDir, storedName);
+    await writeFile(storedPath, file.buffer, { flag: 'wx', mode: 0o600 });
+    return { storedName, storedPath, sha256 };
+  }
 
   private async resolveTemplate(
     accountId: number,
@@ -89,26 +156,89 @@ export class StatementService {
     };
   }
 
+  /** فحص الملف: التعرّف على الأعمدة واقتراح التعيين — لا يكتب شيئاً */
+  async inspect(file: { buffer: Buffer; originalname: string }) {
+    const { sheets } = readStatementWorkbook(file.buffer, file.originalname);
+    if (!sheets.length) throw ERR.VALIDATION([{ field: 'file', messageAr: 'الملف فارغ — لا أوراق فيه' }]);
+    const { sheet, ambiguousSheets } = pickStatementSheet(sheets);
+    const detection = detectColumnMapping(sheet.rows);
+    const warnings = [...detection.warnings];
+    if (ambiguousSheets.length > 1) {
+      warnings.unshift(`الملف يحوي معاملات في أكثر من ورقة (${ambiguousSheets.join('، ')}) — سيُقرأ «${sheet.name}»؛ صدّر الورقة المطلوبة وحدها عند الحاجة`);
+    }
+    return {
+      sheetName: sheet.name,
+      sheetNames: sheets.map((item) => item.name),
+      ...detection,
+      warnings,
+    };
+  }
+
   async upload(
     actorId: number,
     file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
-    input: { accountId: number; side: 'ours' | 'theirs'; templateId: number | null },
+    input: {
+      accountId: number;
+      side: StatementSide;
+      templateId: number | null;
+    } & Partial<UploadMappingInput>,
   ): Promise<Record<string, unknown>> {
     const account = await this.accounts.getById(input.accountId);
     if (!account) throw ERR.PARTNER_NOT_FOUND();
     if (!account.isActive) throw ERR.VALIDATION([{ field: 'accountId', messageAr: 'حساب المورد معطل — فعّله أولاً' }]);
 
-    const template = await this.resolveTemplate(input.accountId, input.side, input.templateId);
-    const parsed = parseStatementFile(file.buffer, file.originalname, template);
+    let template: ResolvedTemplate;
+    if (input.mapping) {
+      // تعيين يدوي/مؤكد من الواجهة — قد يُحفظ كقالب لإعادة الاستخدام
+      const mapping = normalizeMapping(input.mapping);
+      template = {
+        id: null,
+        headerRows: input.headerRows ?? 1,
+        columnsMapping: mapping,
+        dateFormats: DEFAULT_DATE_FORMATS,
+        decimalSep: input.decimalSep ?? '.',
+        thousandSep: input.thousandSep ?? ',',
+      };
+      if (input.saveTemplate?.name) {
+        const saved = await this.templates.create({
+          accountId: input.side === 'ours' ? null : input.accountId,
+          templateKind: input.side,
+          name: input.saveTemplate.name,
+          headerRows: template.headerRows,
+          columnsMapping: mapping,
+          dateFormats: template.dateFormats,
+          decimalSep: template.decimalSep,
+          thousandSep: template.thousandSep,
+          isDefault: input.saveTemplate.isDefault,
+          createdBy: actorId,
+        });
+        template.id = saved.id;
+      }
+    } else if (input.templateId) {
+      template = await this.resolveTemplate(input.accountId, input.side, input.templateId);
+    } else {
+      // «تلقائي»: تعرّف على الأعمدة من ترويسة الملف نفسها — لا قالب ثابت
+      const detection = await this.inspect(file);
+      const mapping = usableMapping(detection);
+      template = mapping
+        ? {
+            id: null,
+            headerRows: detection.headerRows,
+            columnsMapping: mapping,
+            dateFormats: DEFAULT_DATE_FORMATS,
+            decimalSep: detection.decimalSep,
+            thousandSep: detection.thousandSep,
+          }
+        : AUTO_TEMPLATE;
+    }
+
+    const parsed = parseStatementFile(file.buffer, file.originalname, template, input.side);
 
     // حفظ الملف فوراً — الاعتماد يسجل source_file (الإلغاء يترك ملفاً يتيمًا مقبول)
-    await mkdir(UPLOAD_DIR, { recursive: true });
-    const sha256 = createHash('sha256').update(file.buffer).digest('hex');
-    const storedName = `${Date.now()}-${sha256.slice(0, 12)}-${file.originalname.replace(/[^\w.\-]/g, '_')}`;
-    const storedPath = path.join(UPLOAD_DIR, storedName);
-    await writeFile(storedPath, file.buffer);
+    const { storedName, storedPath, sha256 } = await this.saveSourceFile(file);
 
     const token = putPreview({
+      kind: 'spreadsheet',
       accountId: input.accountId,
       currencyCode: account.currencyCode,
       side: input.side,
@@ -121,6 +251,9 @@ export class StatementService {
       sizeBytes: file.size,
       lines: parsed.lines,
       openingHint: parsed.opening,
+      dateFormats: template.dateFormats,
+      decimalSep: template.decimalSep,
+      thousandSep: template.thousandSep,
       createdBy: actorId,
     });
 
@@ -131,10 +264,56 @@ export class StatementService {
       closingHint: parsed.closingHint,
       templateId: template.id,
       lineCount: parsed.lines.length,
+      sheetName: parsed.sheetName,
+      decimalSep: template.decimalSep,
+      thousandSep: template.thousandSep,
+      mapping: template.columnsMapping,
     };
   }
 
-  updateLine(token: string, lineNo: number, patch: Record<string, unknown>): RawLine {
+  async uploadOcr(
+    actorId: number,
+    file: { buffer: Buffer; originalname: string; mimetype: string; size: number },
+    input: { accountId: number; side: 'ours' | 'theirs' },
+    draft: OcrResult,
+  ): Promise<string> {
+    const account = await this.accounts.getById(input.accountId);
+    if (!account) throw ERR.PARTNER_NOT_FOUND();
+    if (!account.isActive) throw ERR.VALIDATION([{ field: 'accountId', messageAr: 'حساب المورد معطل — فعّله أولاً' }]);
+    const { storedName, storedPath, sha256 } = await this.saveSourceFile(file);
+    return putPreview({
+      kind: 'ocr',
+      accountId: input.accountId,
+      currencyCode: account.currencyCode,
+      side: input.side,
+      templateId: null,
+      fileName: storedName,
+      originalName: file.originalname,
+      storedPath,
+      sha256,
+      mimeType: file.mimetype || null,
+      sizeBytes: file.size,
+      lines: draft.lines.map((line) => ({
+        lineNo: line.lineNo,
+        dateRaw: line.dateRaw,
+        docType: '',
+        docNo: '',
+        description: line.description,
+        ref: line.ref,
+        debitRaw: line.debitRaw,
+        creditRaw: line.creditRaw,
+        ocrConfidence: line.ocrConfidence,
+      })),
+      openingHint: draft.opening,
+      dateFormats: DEFAULT_DATE_FORMATS,
+      decimalSep: '.',
+      thousandSep: ',',
+      createdBy: actorId,
+    });
+  }
+
+  updateLine(actorId: number, token: string, lineNo: number, patch: Record<string, unknown>): RawLine {
+    if (getPreview(token).createdBy !== actorId) throw ERR.FORBIDDEN();
     const allowed: Record<string, string> = {
       dateRaw: 'dateRaw',
       description: 'description',
@@ -163,6 +342,8 @@ export class StatementService {
 
       if (!date) errors.push({ field: label, messageAr: `البند ${raw.lineNo}: تاريخ غير صالح «${raw.dateRaw || 'فارغ'}»` });
       if (!raw.description) errors.push({ field: label, messageAr: `البند ${raw.lineNo}: البيان فارغ` });
+      if (raw.debitRaw.trim() && debit === null) errors.push({ field: label, messageAr: `البند ${raw.lineNo}: المدين غير صالح «${raw.debitRaw}»` });
+      if (raw.creditRaw.trim() && credit === null) errors.push({ field: label, messageAr: `البند ${raw.lineNo}: الدائن غير صالح «${raw.creditRaw}»` });
       if (debit === null && credit === null) {
         errors.push({ field: label, messageAr: `البند ${raw.lineNo}: لا مدين ولا دائن — أدخل أحدهما` });
       }
@@ -190,6 +371,7 @@ export class StatementService {
     ip: string | null,
   ): Promise<{ statementId: number; lineCount: number; totalDebit: number; totalCredit: number; sessionId?: number; bothAttached?: boolean }> {
     const preview = getPreview(token);
+    if (preview.createdBy !== actorId) throw ERR.FORBIDDEN();
 
     // ربط الجلسة (Module 4): تحقق مسبق برسائل واضحة — الحسم داخل معاملة الاعتماد
     if (body.sessionId) {
@@ -203,9 +385,10 @@ export class StatementService {
     const template = preview.templateId
       ? await this.templates.getById(preview.templateId)
       : null;
-    const dateFormats = template?.dateFormats ?? AUTO_TEMPLATE.dateFormats;
-    const decimalSep = template?.decimalSep ?? '.';
-    const thousandSep = template?.thousandSep ?? ',';
+    // إعدادات التحليل تُقرأ من المعاينة نفسها (تعيين مؤقت أو قالب محفوظ) — لا افتراضات
+    const dateFormats = preview.dateFormats ?? template?.dateFormats ?? AUTO_TEMPLATE.dateFormats;
+    const decimalSep = preview.decimalSep ?? template?.decimalSep ?? '.';
+    const thousandSep = preview.thousandSep ?? template?.thousandSep ?? ',';
 
     const { lines, errors } = this.materializeLines(preview.side, preview.lines, dateFormats, decimalSep, thousandSep);
     if (errors.length) throw ERR.VALIDATION(errors);
@@ -217,9 +400,9 @@ export class StatementService {
     // كشفنا:  افتتاحي + Σدائن − Σمدين (أونكس: رصيد المورد دائن)
     if (body.announcedClosing !== undefined && body.announcedClosing !== null) {
       const computedClosing =
-        Number(preview.openingHint ?? body.openingBalance ?? 0) +
+        Number(body.openingBalance ?? preview.openingHint ?? 0) +
         (preview.side === 'ours' ? totalCredit - totalDebit : totalDebit - totalCredit);
-      if (Math.abs(computedClosing - body.announcedClosing) > 0.005) {
+      if (Math.abs(computedClosing - body.announcedClosing) >= 0.00005) {
         throw ERR.VALIDATION([
           {
             field: 'announcedClosing',
@@ -253,7 +436,12 @@ export class StatementService {
         uploadedBy: actorId,
       },
       createdBy: actorId,
-      lines,
+      ocrApplied: preview.kind === 'ocr' && preview.lines.some((line) => line.ocrConfidence != null),
+      lines: lines.map((line, index) => ({
+        ...line,
+        ocrConfidence: preview.lines[index].ocrConfidence ?? null,
+        needsReview: preview.lines[index].ocrConfidence != null && preview.lines[index].ocrConfidence! < 0.9,
+      })),
     });
 
     let bothAttached: boolean | undefined;
@@ -275,17 +463,18 @@ export class StatementService {
     return { statementId, lineCount: lines.length, totalDebit, totalCredit, sessionId: body.sessionId ?? undefined, bothAttached };
   }
 
-  /** إدخال يدوي/OCR بعد التدقيق البشري (بدون ملف) */
+  /** إدخال يدوي بلا ملف */
   async manual(
     actorId: number,
     input: {
       accountId: number;
       side: 'ours' | 'theirs';
+      sessionId?: number | null;
       openingBalance?: number | null;
-      lines: Array<{ entryDate: string; description: string; ref?: string; debit?: number | null; credit?: number | null; ocrConfidence?: number | null }>;
+      lines: Array<{ entryDate: string; description: string; ref?: string; debit?: number | null; credit?: number | null }>;
     },
     ip: string | null,
-  ): Promise<{ statementId: number; lineCount: number }> {
+  ): Promise<{ statementId: number; lineCount: number; totalDebit: number; totalCredit: number; sessionId?: number; bothAttached?: boolean }> {
     const account = await this.accounts.getById(input.accountId);
     if (!account) throw ERR.PARTNER_NOT_FOUND();
 
@@ -302,22 +491,20 @@ export class StatementService {
     const { lines, errors } = this.materializeLines(input.side, rawLines, ['YYYY-MM-DD', 'DD/MM/YYYY'], '.', ',');
     if (errors.length) throw ERR.VALIDATION(errors);
 
-    const needsReview = input.lines.some((l) => l.ocrConfidence != null && l.ocrConfidence < 0.9);
     const statementId = await this.statements.createWithLines({
       accountId: input.accountId,
       currencyCode: account.currencyCode,
       side: input.side,
+      sessionId: input.sessionId ?? null,
       openingBalance: input.openingBalance ?? null,
-      ocrApplied: input.lines.some((l) => l.ocrConfidence != null),
       createdBy: actorId,
       lines: lines.map((l, i) => ({
         ...l,
         ourRef: input.side === 'ours' ? input.lines[i].ref ?? null : null,
         theirRef: input.side === 'theirs' ? input.lines[i].ref ?? null : null,
-        ocrConfidence: input.lines[i].ocrConfidence ?? null,
-        needsReview,
       })),
     });
+    const after = input.sessionId ? await this.sessions.getById(input.sessionId) : null;
     await this.audit.write({
       actorId,
       action: 'STATEMENT_MANUAL',
@@ -326,7 +513,14 @@ export class StatementService {
       after: { accountId: input.accountId, side: input.side, lines: lines.length },
       ip,
     });
-    return { statementId, lineCount: lines.length };
+    return {
+      statementId,
+      lineCount: lines.length,
+      totalDebit: lines.reduce((total, line) => total + Number(line.debit ?? 0), 0),
+      totalCredit: lines.reduce((total, line) => total + Number(line.credit ?? 0), 0),
+      sessionId: input.sessionId ?? undefined,
+      bothAttached: after ? Boolean(after.ourStatementId && after.theirStatementId) : undefined,
+    };
   }
 
   async getById(id: number) {

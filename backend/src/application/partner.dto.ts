@@ -83,8 +83,11 @@ export const templateCreateSchema = z.object({
     .record(z.string(), z.string())
     .refine((m) => Object.keys(m).length >= 1, 'حدّد تعيين عمود واحد على الأقل'),
   dateFormats: z.array(z.string().trim().min(1)).min(1).default(['YYYY-MM-DD', 'DD/MM/YYYY']),
-  decimalSep: z.string().max(1).default('.'),
-  thousandSep: z.string().max(1).default(','),
+  decimalSep: z.enum(['.', ',']).default('.'),
+  thousandSep: z.enum(['.', ',']).default(','),
   isDefault: z.boolean().default(false),
+}).refine((value) => value.decimalSep !== value.thousandSep, {
+  message: 'الفاصلة العشرية وفاصل الآلاف يجب أن يختلفا',
+  path: ['thousandSep'],
 });
 export type TemplateCreateInput = z.infer<typeof templateCreateSchema>;

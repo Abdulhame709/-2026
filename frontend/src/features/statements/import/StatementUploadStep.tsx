@@ -1,18 +1,19 @@
 import { CheckCircleFilled, CloseCircleFilled, FileTextOutlined, InboxOutlined } from '@ant-design/icons';
-import { Alert, App, Button, Input, InputNumber, Select, Space, Spin, Table, Tooltip, Typography, Upload } from 'antd';
+import { Alert, App, Button, Checkbox, Input, InputNumber, Select, Space, Spin, Table, Tooltip, Typography, Upload } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CommittedStatementInfo, ParsedStatement, PreviewLine, StatementSide } from '@/shared/types';
 import { computeTotalsCheck, formatMoney, validateLine } from './statementValidation';
 import {
   commitStatementPreview,
+  inspectStatementFile,
   listAccountTemplates,
   patchPreviewLine,
   toPreviewLine,
   uploadStatementPreview,
-  commitManualStatement,
   ocrStatementPdf,
 } from './statementsClient';
+import type { InspectColumn, InspectResult, MappingField, UploadOptions } from './statementsClient';
 
 /**
  * خطوة رفع كشف واحدة (تُستخدم مرتين: كشفنا / كشف المورد) — وثيقة التصميم §4:
@@ -37,6 +38,32 @@ interface ServerTemplate {
   name: string;
   templateKind: 'ours' | 'theirs';
   isDefault: boolean;
+  decimalSep: string;
+  thousandSep: string;
+}
+
+/** حقول تعيين الأعمدة كما تظهر في القائمة المنسدلة */
+const MAPPING_FIELDS: Array<{ value: MappingField; label: string }> = [
+  { value: 'date', label: 'التاريخ' },
+  { value: 'docType', label: 'نوع المستند' },
+  { value: 'docNo', label: 'رقم المستند' },
+  { value: 'description', label: 'البيان' },
+  { value: 'ref', label: 'المرجع' },
+  { value: 'debit', label: 'مدين' },
+  { value: 'credit', label: 'دائن' },
+  { value: 'amount', label: 'المبلغ' },
+  { value: 'balance', label: 'الرصيد (كمبلغ)' },
+  { value: 'currency', label: 'العملة (تُهمل)' },
+];
+
+/** نتيجة الفحص → خريطة عمود/حقل للعرض والتحرير */
+function toColumnFields(inspection: InspectResult): Record<string, MappingField | ''> {
+  const byLetter: Record<string, MappingField | ''> = {};
+  for (const column of inspection.columns) byLetter[column.letter] = '';
+  for (const [field, letter] of Object.entries(inspection.mapping)) {
+    if (letter && field in byLetter) byLetter[letter] = field as MappingField;
+  }
+  return byLetter;
 }
 
 export function StatementUploadStep({ side, accountId, sessionId, completed, onCommitted }: StatementUploadStepProps) {
@@ -44,17 +71,28 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
 
   const [fileMeta, setFileMeta] = useState<{ name: string; sizeKb: number } | null>(null);
   const [templates, setTemplates] = useState<ServerTemplate[]>([]);
-  const [templateId, setTemplateId] = useState<string>(''); // '' = تلقائي (أعمدة A–E)
+  const [templateId, setTemplateId] = useState<string>(''); // '' = تلقائي (تعرّف على الأعمدة)
   const [previewToken, setPreviewToken] = useState<string | null>(null);
   const [announcedClosing, setAnnouncedClosing] = useState<number | null>(null);
   const [announcedCount, setAnnouncedCount] = useState<number | null>(null);
   const [parsing, setParsing] = useState(false);
+  /** ملف بانتظار تأكيد تعيين الأعمدة (فحص الملف لم يُرفع بعد) */
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [inspection, setInspection] = useState<InspectResult | null>(null);
+  const [columnFields, setColumnFields] = useState<Record<string, MappingField | ''>>({});
+  const [headerRows, setHeaderRows] = useState(1);
+  const [saveAsTemplate, setSaveAsTemplate] = useState(false);
+  const [templateName, setTemplateName] = useState('تقارير المطابقة التجريبية');
+  const [templateIsDefault, setTemplateIsDefault] = useState(false);
   const [parsed, setParsed] = useState<ParsedStatement | null>(null);
   const [lines, setLines] = useState<PreviewLine[]>([]);
   const [highlightLineNo, setHighlightLineNo] = useState<number | null>(null);
   const [committing, setCommitting] = useState(false);
-  /** مسودة OCR: بنود مستخرجة من PDF محلياً — المراجعة إلزامية والاعتماد عبر مسار الإدخال اليدوي */
+  const [savingEdits, setSavingEdits] = useState(0);
+  const pendingEdits = useRef(new Map<number, Promise<unknown>>());
+  /** مسودة OCR: بنود مستخرجة من PDF/صورة — الاعتماد عبر المعاينة الخادمية بعد المراجعة */
   const [ocrDraft, setOcrDraft] = useState(false);
+  const [ocrReviewed, setOcrReviewed] = useState(false);
 
   // قوالب الاستيراد المحفوظة لهذا الحساب (FR-2.3) — تُصفّى حسب جهة الكشف
   useEffect(() => {
@@ -65,26 +103,29 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
   }, [accountId, side]);
 
   const templateOptions = [
-    { value: '', label: 'تلقائي (أعمدة A–E)' },
+    { value: '', label: 'تلقائي (تعرّف على الأعمدة)' },
     ...templates.map((t) => ({
       value: String(t.id),
       label: `${t.name}${t.isDefault ? ' ★' : ''}`,
     })),
   ];
 
+  const decimalSep = parsed?.decimalSep ?? '.';
+  const thousandSep = parsed?.thousandSep ?? ',';
   const errorsByLine = useMemo(() => {
     const map = new Map<number, ReturnType<typeof validateLine>>();
     lines.forEach((l) => {
-      const errs = validateLine(l);
+      const errs = validateLine(l, decimalSep, thousandSep);
       if (errs.length > 0) map.set(l.lineNo, errs);
     });
     return map;
-  }, [lines]);
+  }, [lines, decimalSep, thousandSep]);
 
   const totalErrors = errorsByLine.size;
   const totals = parsed
-    ? computeTotalsCheck(lines, parsed.opening, side, announcedClosing, announcedCount)
+    ? computeTotalsCheck(lines, parsed.opening, side, announcedClosing, announcedCount, decimalSep, thousandSep)
     : null;
+  const totalsMismatch = Boolean(totals && (!totals.closingOk || !totals.countOk));
 
   /** استخراج PDF محلياً (طبقة نصية أو OCR) → مسودة مراجعة إلزامية */
   const handlePdfOcr = (file: File) => {
@@ -96,6 +137,10 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
     setParsing(true);
     setParsed(null);
     setPreviewToken(null);
+    setAnnouncedClosing(null);
+    setAnnouncedCount(null);
+    setInspection(null);
+    setPendingFile(null);
     ocrStatementPdf(accountId, side, file)
       .then((draft) => {
         const rows = Array.isArray(draft?.lines) ? draft.lines : [];
@@ -109,15 +154,18 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
           ref: l.ref,
           debitRaw: l.debitRaw,
           creditRaw: l.creditRaw,
+          ocrConfidence: l.ocrConfidence,
         }));
         setLines(mapped);
+        setPreviewToken(draft.token);
         setOcrDraft(true);
+        setOcrReviewed(false);
         setParsed({ opening: draft.opening ?? null, lines: mapped, announcedClosing: null, announcedCount: null });
         setParsing(false);
         message.info(
           draft.mode === 'text'
-            ? `استُخرجت ${rows.length} بنداً من طبقة PDF النصية — راجع كل بند (المبالغ والاتجاه) قبل الاعتماد`
-            : `قرأ النظام ${rows.length} بنداً من الملف الممسوح — المراجعة إلزامية فالقراءة الآلية قد تخطئ`,
+            ? `استُخرجت ${rows.length} بنداً من ${draft.pages} صفحة PDF — راجع كل بند (المبالغ والاتجاه) قبل الاعتماد`
+            : `استُخرجت ${rows.length} بنداً من ${draft.pages} صفحة/صورة — المراجعة إلزامية فالقراءة الآلية قد تخطئ`,
         );
       })
       .catch((e: { messageAr?: string; message?: string }) => {
@@ -137,14 +185,56 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
     setParsing(true);
     setParsed(null);
     setPreviewToken(null);
-    uploadStatementPreview(accountId, side, file, templateId || null)
+    setAnnouncedClosing(null);
+    setAnnouncedCount(null);
+    setInspection(null);
+    setPendingFile(null);
+    setOcrDraft(false);
+    // قالب محفوظ مختار: رفع مباشر. «تلقائي»: فحص الأعمدة أولاً وعرض التعيين للمراجعة
+    if (templateId) {
+      uploadSpreadsheet(file);
+      return;
+    }
+    setPendingFile(file);
+    inspectStatementFile(accountId, side, file)
+      .then((result) => {
+        setInspection(result);
+        setHeaderRows(result.headerRows);
+        setColumnFields(toColumnFields(result));
+        setParsing(false);
+      })
+      .catch((e: { messageAr?: string; message?: string }) => {
+        setParsing(false);
+        setFileMeta(null);
+        setPendingFile(null);
+        message.error(e?.messageAr ?? e?.message ?? 'فشل فحص أعمدة الملف');
+      });
+  };
+
+  /** الرفع الفعلي للمعاينة بعد تأكيد التعيين (أو مباشرة مع قالب محفوظ) */
+  const uploadSpreadsheet = (file: File, options: UploadOptions = {}) => {
+    if (!accountId) return;
+    setParsing(true);
+    setParsed(null);
+    setPreviewToken(null);
+    setAnnouncedClosing(null);
+    setAnnouncedCount(null);
+    setInspection(null);
+    setPendingFile(null);
+    uploadStatementPreview(accountId, side, file, templateId || null, options)
       .then((p) => {
         const mapped = p.lines.map(toPreviewLine);
         setPreviewToken(p.token);
         setLines(mapped);
-        setParsed({ opening: p.opening, lines: mapped, announcedClosing: null, announcedCount: null });
+        setParsed({ opening: p.opening, lines: mapped, announcedClosing: null, announcedCount: null, templateId: p.templateId, decimalSep: p.decimalSep, thousandSep: p.thousandSep });
         setParsing(false);
-        message.success(`حُلّل الملف: ${p.lineCount} بنداً — راجع المعاينة قبل الاعتماد`);
+        message.success(`حُلّلت ورقة «${p.sheetName}»: ${p.lineCount} بنداً — راجع المعاينة قبل الاعتماد`);
+        if (options.saveTemplate) {
+          message.success(`حُفظ القالب «${options.saveTemplate.name}» — سيظهر في القائمة`);
+          listAccountTemplates(accountId)
+            .then((all) => setTemplates(all.filter((t) => t.templateKind === side)))
+            .catch(() => undefined);
+        }
       })
       .catch((e: { messageAr?: string; message?: string }) => {
         setParsing(false);
@@ -153,51 +243,82 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
       });
   };
 
+  /** تعيين حقل لعمود — الحقل لا يُستخدم إلا لعمود واحد */
+  const setColumnField = (letter: string, field: MappingField | '') => {
+    setColumnFields((prev) => {
+      const next = { ...prev };
+      if (field) {
+        for (const key of Object.keys(next)) if (next[key] === field) next[key] = '';
+      }
+      next[letter] = field;
+      return next;
+    });
+  };
+
+  const mapping = useMemo(() => {
+    const out: Partial<Record<MappingField, string>> = {};
+    for (const [letter, field] of Object.entries(columnFields)) {
+      if (field) out[field] = letter;
+    }
+    return out;
+  }, [columnFields]);
+  const mappingMissingDate = !mapping.date;
+  const mappingMissingAmount = !mapping.debit && !mapping.credit && !mapping.amount && !mapping.balance;
+  const mappingReady = !mappingMissingDate && !mappingMissingAmount;
+
+  const confirmMapping = () => {
+    if (!pendingFile || !inspection || !mappingReady) return;
+    uploadSpreadsheet(pendingFile, {
+      mapping,
+      headerRows,
+      decimalSep: inspection.decimalSep,
+      thousandSep: inspection.thousandSep,
+      saveTemplate:
+        saveAsTemplate && templateName.trim()
+          ? { name: templateName.trim(), isDefault: templateIsDefault }
+          : null,
+    });
+  };
+
+  /** إلغاء الرفع الحالي والعودة لاختيار ملف جديد — لا يترك معاينة معلّقة */
+  const resetUpload = () => {
+    setFileMeta(null);
+    setParsed(null);
+    setLines([]);
+    setPreviewToken(null);
+    setInspection(null);
+    setPendingFile(null);
+    setColumnFields({});
+    setHeaderRows(1);
+    setOcrDraft(false);
+    setOcrReviewed(false);
+    setAnnouncedClosing(null);
+    setAnnouncedCount(null);
+  };
+
   /** تصحيح بند: محلي فوري + حفظ في المعاينة الخادمية (مرجع الاعتماد) */
   const updateLine = (lineNo: number, field: keyof PreviewLine, value: string) => {
+    if (ocrDraft) setOcrReviewed(false);
     const valueBefore = lines.find((l) => l.lineNo === lineNo)?.[field] ?? '';
     setLines((prev) => prev.map((l) => (l.lineNo === lineNo ? { ...l, [field]: value } : l)));
     if (!previewToken) return;
-    patchPreviewLine(previewToken, lineNo, { [field]: value }).catch(() => {
+    const previous = pendingEdits.current.get(lineNo) ?? Promise.resolve();
+    const saved = previous.catch(() => undefined).then(() => patchPreviewLine(previewToken, lineNo, { [field]: value }));
+    pendingEdits.current.set(lineNo, saved);
+    setSavingEdits(pendingEdits.current.size);
+    saved.catch(() => {
       message.error('تعذر حفظ التعديل على الخادم — أُعيد النص السابق');
-      setLines((prev) => prev.map((l) => (l.lineNo === lineNo ? { ...l, [field]: valueBefore } : l)));
+      setLines((prev) => prev.map((l) => (l.lineNo === lineNo && l[field] === value ? { ...l, [field]: valueBefore } : l)));
+    }).finally(() => {
+      if (pendingEdits.current.get(lineNo) === saved) {
+        pendingEdits.current.delete(lineNo);
+        setSavingEdits(pendingEdits.current.size);
+      }
     });
   };
 
   const commit = () => {
-    if (!parsed || totalErrors > 0) return;
-    if (ocrDraft && !previewToken && accountId) {
-      // مسودة OCR: اعتماد عبر مسار الإدخال اليدوي بعد المراجعة الإلزامية
-      setCommitting(true);
-      commitManualStatement(accountId, side, {
-        openingBalance: parsed.opening,
-        sessionId,
-        lines: lines.map((l) => ({
-          entryDate: l.dateRaw,
-          description: l.description,
-          ref: l.ref || undefined,
-          debit: l.debitRaw ? Number(l.debitRaw) : null,
-          credit: l.creditRaw ? Number(l.creditRaw) : null,
-        })),
-      })
-        .then((res) => {
-          setCommitting(false);
-          message.success(`اعتُمد ${SIDE_LABELS[side]} بعد المراجعة — كشف #${res.statementId} (${res.lineCount} بنداً)`);
-          onCommitted({
-            fileName: fileMeta?.name ?? 'PDF',
-            lines,
-            parsed: { opening: parsed.opening, lines, announcedClosing: totals?.computedClosing ?? null, announcedCount: lines.length },
-            statementId: res.statementId,
-            totalDebit: res.totalDebit,
-            totalCredit: res.totalCredit,
-          });
-        })
-        .catch((e: { messageAr?: string; message?: string }) => {
-          setCommitting(false);
-          message.error(e?.messageAr ?? 'فشل اعتماد البنود المستخرجة');
-        });
-      return;
-    }
+    if (!parsed || totalErrors > 0 || totalsMismatch || savingEdits > 0 || (ocrDraft && !ocrReviewed)) return;
     if (!previewToken) return;
     setCommitting(true);
     commitStatementPreview(previewToken, {
@@ -208,9 +329,7 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
     })
       .then((res) => {
         setCommitting(false);
-        message.success(
-          `اعتُمد ${SIDE_LABELS[side]} — كشف #${res.statementId} (${res.lineCount} بنداً)`,
-        );
+        message.success(`اعتُمد ${SIDE_LABELS[side]} — كشف #${res.statementId} (${res.lineCount} بنداً)`);
         onCommitted({
           fileName: fileMeta?.name ?? 'ملف',
           lines,
@@ -323,15 +442,21 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
       ),
     },
     {
-      title: '',
+      title: ocrDraft ? 'ثقة OCR' : '',
       key: 'status',
-      width: 40,
-      render: (_, row) =>
-        errorsByLine.has(row.lineNo) ? (
-          <CloseCircleFilled style={{ color: 'var(--color-error)' }} aria-label="بند به خطأ" />
-        ) : (
-          <CheckCircleFilled style={{ color: 'var(--color-success)' }} aria-label="بند سليم" />
-        ),
+      width: ocrDraft ? 100 : 40,
+      render: (_, row) => (
+        <Space size={4}>
+          {errorsByLine.has(row.lineNo)
+            ? <CloseCircleFilled style={{ color: 'var(--color-error)' }} aria-label="بند به خطأ" />
+            : <CheckCircleFilled style={{ color: 'var(--color-success)' }} aria-label="بند سليم" />}
+          {ocrDraft && row.ocrConfidence != null && (
+            <Typography.Text type={row.ocrConfidence < 0.9 ? 'warning' : 'secondary'}>
+              {Math.round(row.ocrConfidence * 100)}%
+            </Typography.Text>
+          )}
+        </Space>
+      ),
     },
   ];
 
@@ -387,8 +512,6 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
               المسموح: Excel (xlsx/xls) أو CSV — وPDF/صورة يُقرأ محلياً (طبقة نصية أو OCR) ثم تراجع بنوده قبل الاعتماد · يُفحص الملف تلقائياً (تواريخ، مبالغ، تسلسل الأرصدة) قبل الحفظ — FR-3.4
             </p>
           </Upload.Dragger>
-          <Space wrap style={{ marginTop: 12 }}>
-          </Space>
         </>
       )}
 
@@ -396,6 +519,132 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
         <div className="parse-loading" role="status">
           <Spin />
           <Typography.Text type="secondary">جارٍ تحليل «{fileMeta.name}»…</Typography.Text>
+        </div>
+      )}
+
+      {fileMeta && !parsing && inspection && pendingFile && (
+        <div className="mapping-panel">
+          <Alert
+            type={mappingReady ? 'info' : 'warning'}
+            showIcon
+            message={`تعيين أعمدة «${fileMeta.name}» — ورقة «${inspection.sheetName}»`}
+            description="اقترحنا الحقول من ترويسة الملف. راجعها وصحّحها قبل التحليل — كل عمود يُستخدم مرة واحدة، و«تجاهل» تعني ألا يُقرأ."
+          />
+
+          {inspection.warnings.length > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              message="تنبيهات التعرّف التلقائي"
+              description={
+                <ul className="issue-list">
+                  {inspection.warnings.map((warning, index) => (
+                    <li key={index}>
+                      <Typography.Text type="secondary">{warning}</Typography.Text>
+                    </li>
+                  ))}
+                </ul>
+              }
+            />
+          )}
+
+          <Table<InspectColumn>
+            rowKey="letter"
+            size="small"
+            pagination={false}
+            dataSource={inspection.columns}
+            className="mapping-table"
+            columns={[
+              { title: 'العمود', dataIndex: 'letter', width: 70, render: (letter: string) => <strong dir="ltr">{letter}</strong> },
+              {
+                title: 'الترويسة في الملف',
+                dataIndex: 'header',
+                width: 190,
+                render: (header: string) => header || <Typography.Text type="secondary">— بلا ترويسة —</Typography.Text>,
+              },
+              {
+                title: 'أمثلة من الصفوف',
+                dataIndex: 'sample',
+                render: (sample: string[]) => (
+                  <Typography.Text type="secondary" dir="auto">
+                    {sample.length ? sample.join(' · ') : '—'}
+                  </Typography.Text>
+                ),
+              },
+              {
+                title: 'يُقرأ كـ',
+                key: 'field',
+                width: 210,
+                render: (_, column) => (
+                  <Select<MappingField | ''>
+                    size="small"
+                    style={{ width: '100%' }}
+                    value={columnFields[column.letter] ?? ''}
+                    onChange={(value) => setColumnField(column.letter, value)}
+                    aria-label={`حقل العمود ${column.letter}`}
+                    options={[{ value: '', label: 'تجاهل' }, ...MAPPING_FIELDS]}
+                  />
+                ),
+              },
+            ]}
+          />
+
+          <Space wrap className="mapping-controls">
+            <span>عدد صفوف الترويسة</span>
+            <InputNumber
+              size="small"
+              min={0}
+              max={15}
+              precision={0}
+              value={headerRows}
+              onChange={(value) => setHeaderRows(Number(value ?? 0))}
+              aria-label="عدد صفوف الترويسة قبل أول بند"
+            />
+            <Typography.Text type="secondary">
+              الفاصل العشري «{inspection.decimalSep}» · فاصل الآلاف «{inspection.thousandSep}»
+            </Typography.Text>
+          </Space>
+
+          <Space direction="vertical" size={4} className="mapping-save">
+            <Checkbox checked={saveAsTemplate} onChange={(event) => setSaveAsTemplate(event.target.checked)}>
+              حفظ هذا التعيين كقالب لهذا النوع من الملفات
+            </Checkbox>
+            {saveAsTemplate && (
+              <Space wrap>
+                <Input
+                  size="small"
+                  value={templateName}
+                  onChange={(event) => setTemplateName(event.target.value)}
+                  maxLength={80}
+                  style={{ width: 280 }}
+                  aria-label="اسم القالب"
+                  placeholder="اسم القالب"
+                />
+                <Checkbox checked={templateIsDefault} onChange={(event) => setTemplateIsDefault(event.target.checked)}>
+                  اجعله القالب الافتراضي
+                </Checkbox>
+              </Space>
+            )}
+          </Space>
+
+          {!mappingReady && (
+            <Alert
+              type="error"
+              showIcon
+              message={
+                mappingMissingDate
+                  ? 'عيّن عمود التاريخ أولاً'
+                  : 'عيّن عمود مبلغ (مدين/دائن أو المبلغ) — لا يكفي التاريخ والبيان'
+              }
+            />
+          )}
+
+          <Space wrap style={{ marginTop: 12 }}>
+            <Button type="primary" onClick={confirmMapping} disabled={!mappingReady}>
+              متابعة إلى المعاينة
+            </Button>
+            <Button onClick={resetUpload}>إلغاء واختيار ملف آخر</Button>
+          </Space>
         </div>
       )}
 
@@ -410,11 +659,9 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
                 value={templateId}
                 onChange={(v) => {
                   setTemplateId(v);
-                  if (parsed) {
+                  if (parsed || inspection) {
                     // القالب يغيّر تفسير الأعمدة — تُلغى المعاينة الحالية
-                    setParsed(null);
-                    setPreviewToken(null);
-                    setFileMeta(null);
+                    resetUpload();
                     message.info('غيّرت القالب — أعد رفع الملف لتطبيقه');
                   }
                 }}
@@ -422,14 +669,7 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
                 aria-label="قالب الاستيراد"
                 options={templateOptions}
               />
-              <Button
-                size="small"
-                onClick={() => {
-                  setFileMeta(null);
-                  setParsed(null);
-                  setLines([]);
-                }}
-              >
+              <Button size="small" onClick={resetUpload}>
                 تغيير الملف
               </Button>
             </Space>
@@ -490,17 +730,17 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
                 ? 'الختامي: غير معلن'
                 : totals!.closingOk
                   ? 'الختامي مطابق ✓'
-                  : `فرق ختامي ✗ (${formatMoney(Math.abs(totals!.computedClosing - (announcedClosing ?? 0)))})`}
+                  : `فرق ختامي ✗ (${Math.abs(totals!.computedClosing - (announcedClosing ?? 0)).toFixed(4)})`}
             </div>
           </div>
 
-          {totalErrors > 0 ? (
+          {totalErrors > 0 || totalsMismatch ? (
             <Alert
               type="error"
               showIcon
-              message={`${totalErrors} بنداً يحتاج تصحيحاً قبل الاعتماد`}
+              message={totalErrors > 0 ? `${totalErrors} بنداً يحتاج تصحيحاً قبل الاعتماد` : 'الرصيد الختامي أو عدد البنود المعلن لا يطابق المعاينة'}
               description={
-                <ul className="issue-list">
+                totalErrors > 0 ? <ul className="issue-list">
                   {[...errorsByLine.entries()].slice(0, 5).map(([lineNo, errs]) => (
                     <li key={lineNo}>
                       <button
@@ -525,7 +765,7 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
                       </Typography.Text>
                     </li>
                   )}
-                </ul>
+                </ul> : 'راجع الأرقام المعلنة والبنود قبل الاعتماد'
               }
             />
           ) : (
@@ -555,8 +795,13 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
           />
 
           <div className="commit-row">
-            <Tooltip title={totalErrors > 0 ? 'صحّح الأخطاء أولاً' : 'الحفظ النهائي للكشف'}>
-              <Button type="primary" disabled={totalErrors > 0} loading={committing} onClick={commit}>
+            {ocrDraft && (
+              <Checkbox checked={ocrReviewed} onChange={(event) => setOcrReviewed(event.target.checked)}>
+                راجعت جميع الصفحات والبنود المستخرجة، وتأكدت من التواريخ والمبالغ واتجاه المدين والدائن
+              </Checkbox>
+            )}
+            <Tooltip title={totalErrors > 0 ? 'صحّح الأخطاء أولاً' : totalsMismatch ? 'راجع الرصيد أو عدد البنود المعلن' : savingEdits > 0 ? 'انتظر حفظ التعديلات' : ocrDraft && !ocrReviewed ? 'أكّد مراجعة مسودة OCR أولاً' : 'الحفظ النهائي للكشف'}>
+              <Button type="primary" disabled={totalErrors > 0 || totalsMismatch || savingEdits > 0 || (ocrDraft && !ocrReviewed)} loading={committing} onClick={commit}>
                 اعتماد الكشف
               </Button>
             </Tooltip>

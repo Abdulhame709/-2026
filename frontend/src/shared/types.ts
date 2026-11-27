@@ -91,6 +91,7 @@ export interface PreviewLine {
   ref: string;
   debitRaw: string;
   creditRaw: string;
+  ocrConfidence?: number | null;
 }
 
 /** نتيجة تحليل ملف حقيقي + أرقام التحقق المعلنة (إن ذُكرت في ترويسة الكشف) */
@@ -99,6 +100,9 @@ export interface ParsedStatement {
   lines: PreviewLine[];
   announcedClosing: number | null;
   announcedCount: number | null;
+  templateId?: number | null;
+  decimalSep?: string;
+  thousandSep?: string;
 }
 
 /** معلومات كشف معتمد نهائياً عبر الخادم (Module 3) */

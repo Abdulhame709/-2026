@@ -509,6 +509,21 @@ td.financial-numbers,
   flex-wrap: wrap;
 }
 
+/* لوحة تعيين الأعمدة قبل الرفع — جدول + قوائم منسدلة + حفظ القالب */
+.mapping-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--color-bg-page);
+}
+
+.mapping-table td {
+  vertical-align: middle;
+}
+
 .totals-bar {
   display: flex;
   flex-wrap: wrap;

@@ -10,6 +10,7 @@ import type { RawLine } from './statementParser.js';
 
 interface PreviewSession {
   token: string;
+  kind: 'spreadsheet' | 'ocr';
   accountId: number;
   currencyCode: string;
   side: 'ours' | 'theirs';
@@ -22,6 +23,10 @@ interface PreviewSession {
   sizeBytes: number;
   lines: RawLine[];
   openingHint: number | null;
+  /** إعدادات التحليل الفعلية (قالب محفوظ أو تعيين مؤقت) — الاعتماد يقرأها من هنا لا من القاعدة */
+  dateFormats: string[];
+  decimalSep: string;
+  thousandSep: string;
   createdBy: number;
   expiresAt: number;
 }

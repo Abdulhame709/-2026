@@ -25,6 +25,52 @@ export interface UploadPreview {
   closingHint: number | null;
   templateId: number | null;
   lineCount: number;
+  sheetName: string;
+  decimalSep: string;
+  thousandSep: string;
+  mapping?: Record<string, string>;
+}
+
+/** حقول تعيين الأعمدة — مطابقة لمفاتيح الخادم */
+export type MappingField =
+  | 'date'
+  | 'docType'
+  | 'docNo'
+  | 'description'
+  | 'ref'
+  | 'debit'
+  | 'credit'
+  | 'amount'
+  | 'balance'
+  | 'currency';
+
+export interface InspectColumn {
+  index: number;
+  letter: string;
+  header: string;
+  sample: string[];
+  field: MappingField | null;
+}
+
+/** نتيجة فحص الملف: ترويسة مكتشفة + تعيين مقترح — لا كتابة في القاعدة */
+export interface InspectResult {
+  sheetName: string;
+  sheetNames: string[];
+  headerRowIndex: number;
+  headerRows: number;
+  columns: InspectColumn[];
+  mapping: Partial<Record<MappingField, string>>;
+  decimalSep: string;
+  thousandSep: string;
+  warnings: string[];
+}
+
+export interface UploadOptions {
+  mapping?: Partial<Record<MappingField, string>> | null;
+  headerRows?: number | null;
+  decimalSep?: string;
+  thousandSep?: string;
+  saveTemplate?: { name: string; isDefault: boolean } | null;
 }
 
 export interface CommitResult {
@@ -36,7 +82,7 @@ export interface CommitResult {
 
 /** قوالب الاستيراد المتاحة لحساب (مع خيار تلقائي دائماً في المقدمة) */
 export async function listAccountTemplates(accountId: number) {
-  const { templates } = await api.get<{ templates: Array<{ id: number; name: string; templateKind: 'ours' | 'theirs'; isDefault: boolean }> }>(
+  const { templates } = await api.get<{ templates: Array<{ id: number; name: string; templateKind: 'ours' | 'theirs'; isDefault: boolean; decimalSep: string; thousandSep: string }> }>(
     `/api/v1/accounts/${accountId}/import-templates`,
   );
   return templates;
@@ -54,6 +100,7 @@ export interface OcrDraftLine {
 }
 
 export interface OcrDraft {
+  token: string;
   pages: number;
   mode: 'text' | 'ocr';
   opening: number | null;
@@ -61,14 +108,13 @@ export interface OcrDraft {
 }
 
 /** استخراج بنود كشف PDF محلياً (طبقة نصية أو OCR) — مسودة مراجعة فقط */export function ocrStatementPdf(accountId: number, side: StatementSide, file: File): Promise<OcrDraft> {
-  // الخادم يغلّف المسودة: { draft: {...} } — نفك الغلاف هنا
-  return uploadFile<{ draft: OcrDraft }>('/api/v1/statements/ocr', file, {
+  return uploadFile<{ draft: Omit<OcrDraft, 'token'>; token: string }>('/api/v1/statements/ocr', file, {
     accountId: String(accountId),
     side,
-  }).then((r) => r.draft);
+  }).then((result) => ({ ...result.draft, token: result.token }));
 }
 
-/** اعتماد بنود بعد المراجعة (مسار الإدخال اليدوي نفسه) */
+/** إدخال يدوي بلا ملف أصلي */
 export function commitManualStatement(
   accountId: number,
   side: StatementSide,
@@ -80,18 +126,33 @@ export function commitManualStatement(
   );
 }
 
+/** فحص الملف: التعرّف على الأعمدة واقتراح التعيين قبل الرفع — لا كتابة في القاعدة */
+export function inspectStatementFile(accountId: number, side: StatementSide, file: File): Promise<InspectResult> {
+  return uploadFile<{ inspection: InspectResult }>('/api/v1/statements/inspect', file, {
+    accountId: String(accountId),
+    side,
+  }).then((result) => result.inspection);
+}
+
 /** رفع ملف كشف → معاينة قابلة للتصحيح (لا يُكتب شيء في القاعدة بعد) */
 export function uploadStatementPreview(
   accountId: number,
   side: StatementSide,
   file: File,
   templateId: string | null,
+  options: UploadOptions = {},
 ): Promise<UploadPreview> {
-  return uploadFile<UploadPreview>('/api/v1/statements/upload', file, {
+  const fields: Record<string, string> = {
     accountId: String(accountId),
     side,
     templateId: templateId ?? '',
-  });
+  };
+  if (options.mapping) fields.mapping = JSON.stringify(options.mapping);
+  if (options.headerRows != null) fields.headerRows = String(options.headerRows);
+  if (options.decimalSep) fields.decimalSep = options.decimalSep;
+  if (options.thousandSep) fields.thousandSep = options.thousandSep;
+  if (options.saveTemplate) fields.saveTemplate = JSON.stringify(options.saveTemplate);
+  return uploadFile<UploadPreview>('/api/v1/statements/upload', file, fields);
 }
 
 /** حفظ تصحيح بند في المعاينة (النسخة الخادمية هي المرجع عند الاعتماد) */

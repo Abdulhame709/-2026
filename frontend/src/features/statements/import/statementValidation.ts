@@ -6,13 +6,18 @@ import type { LineError, PreviewLine, StatementSide, TotalsCheck } from '@/share
  */
 
 const DATE_RE = /^(\d{1,4})[/.-](\d{1,2})[/.-](\d{1,4})$/;
+const normalizeNumerals = (text: string, decimalSep: string, thousandSep: string): string => text
+  .replace(/[\u0660-\u0669]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+  .replace(/[\u06f0-\u06f9]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0))
+  .replace(/\u066b/g, decimalSep)
+  .replace(/\u066c/g, thousandSep);
 
 /**
  * تاريخ صالح فعلياً بأي صيغة شائعة: YYYY-MM-DD أو DD/MM/YYYY أو DD-MM-YYYY
  * (سنة قصيرة 26 = 2026). قراءة يوم-أولاً مقدَّمة — عرف الكشوفات المحلي.
  */
 export function isValidStatementDate(raw: string): boolean {
-  const m = DATE_RE.exec(raw.trim());
+  const m = DATE_RE.exec(normalizeNumerals(raw.trim(), '.', ','));
   if (!m) return false;
   let day: number;
   let month: number;
@@ -32,18 +37,19 @@ export function isValidStatementDate(raw: string): boolean {
 }
 
 /** مبلغ رقمي — يتغاضى عن ضوضاء العملة (ر.ي / ﷼ / $) وفواصل الآلاف */
-export function parseAmount(raw: string): number | null {
-  const cleaned = raw
-    .trim()
-    .replace(/[^\d.,-]/g, '')
-    .replace(/,/g, '');
-  if (!/^-?\d+(\.\d{1,2})?$/.test(cleaned)) return null;
-  const value = Number(cleaned);
+export function parseAmount(raw: string, decimalSep = '.', thousandSep = ','): number | null {
+  const cleaned = normalizeNumerals(raw.replace(/(?:YER|USD|SAR|ر\.?ي\.?|ر\.?س\.?|\$|﷼|ريال|دولار)/gi, '').trim(), decimalSep, thousandSep);
+  if (!['.', ','].includes(decimalSep) || !['.', ','].includes(thousandSep) || decimalSep === thousandSep) return null;
+  const decimal = decimalSep === '.' ? '\\.' : ',';
+  const thousands = thousandSep === '.' ? '\\.' : ',';
+  const format = new RegExp(`^(?:\\d{1,3}(?:${thousands}\\d{3})+|\\d+)(?:${decimal}\\d{1,4})?$`);
+  if (!format.test(cleaned)) return null;
+  const value = Number(cleaned.split(thousandSep).join('').replace(decimalSep, '.'));
   return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /** فحص بند واحد — يعيد قائمة أخطاءه (فراغ = سليم) */
-export function validateLine(line: PreviewLine): LineError[] {
+export function validateLine(line: PreviewLine, decimalSep = '.', thousandSep = ','): LineError[] {
   const errors: LineError[] = [];
 
   if (!line.description.trim()) {
@@ -60,18 +66,18 @@ export function validateLine(line: PreviewLine): LineError[] {
   if (!hasDebit && !hasCredit) {
     errors.push({ field: 'debit', message: 'البند بلا مدين ولا دائن' });
   }
-  if (hasDebit && parseAmount(line.debitRaw) === null) {
+  if (hasDebit && parseAmount(line.debitRaw, decimalSep, thousandSep) === null) {
     errors.push({ field: 'debit', message: `مدين غير رقمي: «${line.debitRaw}»` });
   }
-  if (hasCredit && parseAmount(line.creditRaw) === null) {
+  if (hasCredit && parseAmount(line.creditRaw, decimalSep, thousandSep) === null) {
     errors.push({ field: 'credit', message: `دائن غير رقمي: «${line.creditRaw}»` });
   }
   // مدين+دائن معاً مسموح (عرف محاسبي: فاتورة سُددت نقداً تظهر بالجهتين في سطر واحد)
   return errors;
 }
 
-function toNumber(raw: string): number {
-  return parseAmount(raw) ?? 0;
+function toNumber(raw: string, decimalSep: string, thousandSep: string): number {
+  return parseAmount(raw, decimalSep, thousandSep) ?? 0;
 }
 
 /**
@@ -84,9 +90,11 @@ export function computeTotalsCheck(
   side: StatementSide,
   announcedClosing: number | null,
   announcedCount: number | null,
+  decimalSep = '.',
+  thousandSep = ',',
 ): TotalsCheck {
-  const totalDebit = lines.reduce((sum, l) => sum + toNumber(l.debitRaw), 0);
-  const totalCredit = lines.reduce((sum, l) => sum + toNumber(l.creditRaw), 0);
+  const totalDebit = lines.reduce((sum, l) => sum + toNumber(l.debitRaw, decimalSep, thousandSep), 0);
+  const totalCredit = lines.reduce((sum, l) => sum + toNumber(l.creditRaw, decimalSep, thousandSep), 0);
   // اتجاه الرصيد (الوثيقة الكنسية §57): كشفهم مدين = افتتاحي + مدين − دائن،
   // وكشفنا دائن = افتتاحي + دائن − مدين (أي نظام: رصيد المورد دائن عنده)
   const computedClosing =
@@ -96,7 +104,7 @@ export function computeTotalsCheck(
     totalCredit,
     computedClosing,
     // بلا قيم معلنة = لا مقارنة (تظهر «غير معلن» في اللوحة) — الفحص الصارم عند الاعتماد
-    closingOk: announcedClosing === null || Math.abs(computedClosing - announcedClosing) < 0.005,
+    closingOk: announcedClosing === null || Math.abs(computedClosing - announcedClosing) < 0.00005,
     countOk: announcedCount === null || lines.length === announcedCount,
   };
 }
