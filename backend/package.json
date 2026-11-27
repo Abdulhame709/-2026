@@ -15,6 +15,7 @@
     "test:stage3": "npm run build && node --test tests/stage3.test.mjs",
     "test:import": "npm run build && node --test tests/import-reading.test.mjs",
     "test:ocr-db": "npm run build && node tests/ocr-commit.integration.mjs",
+    "test:statements-http": "npm run build && node tests/statements-http.integration.mjs",
     "test:users": "npm run build && node tests/users-management.integration.mjs",
     "test:backup": "npm run build && node --test tests/backup-security.test.mjs",
     "test:backup-restore": "npm run build && node tests/backup-restore.integration.mjs",
