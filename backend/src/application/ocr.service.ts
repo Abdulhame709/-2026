@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { mkdir, copyFile } from 'node:fs/promises';
-import { ERR } from '../domain/errors.js';
+import { AppError, ERR } from '../domain/errors.js';
 
 /**
  * استخراج بنود كشوف PDF محلياً بالكامل (Module 11 — Q16: لا أي خدمة سحابية):
@@ -14,6 +14,45 @@ import { ERR } from '../domain/errors.js';
 // ===== تفييء خامل لمحرك OCR (يعمل عند أول ملف PDF ممسوح فقط) =====
 type OcrWorker = { recognize: (img: Buffer) => Promise<{ data: { text: string; confidence?: number } }>; terminate: () => Promise<unknown> };
 let workerPromise: Promise<OcrWorker> | null = null;
+const MAX_OCR_PIXELS = 12_000_000;
+const MAX_OCR_PAGES = 20;
+
+function imageDimensions(buffer: Buffer, format: 'png' | 'jpeg'): { width: number; height: number } | null {
+  if (format === 'png') {
+    if (buffer.length < 24 || buffer.toString('ascii', 12, 16) !== 'IHDR' || buffer.readUInt32BE(8) !== 13) return null;
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  let offset = 2;
+  while (offset + 4 < buffer.length) {
+    if (buffer[offset++] !== 0xff) return null;
+    while (buffer[offset] === 0xff) offset++;
+    const marker = buffer[offset++];
+    if (marker === 0xda || marker === 0xd9) return null;
+    if (marker === 0x01 || marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (offset + 2 > buffer.length) return null;
+    const length = buffer.readUInt16BE(offset);
+    if (length < 2 || offset + length > buffer.length) return null;
+    if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+      if (length < 7) return null;
+      return { height: buffer.readUInt16BE(offset + 3), width: buffer.readUInt16BE(offset + 5) };
+    }
+    offset += length;
+  }
+  return null;
+}
+
+export function validateOcrImage(buffer: Buffer, expectedFormat: 'png' | 'jpeg'): void {
+  const isPng = buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const isJpeg = buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const format = isPng ? 'png' : isJpeg ? 'jpeg' : null;
+  const dimensions = format === expectedFormat ? imageDimensions(buffer, format) : null;
+  if (!dimensions || dimensions.width === 0 || dimensions.height === 0) {
+    throw ERR.VALIDATION([{ field: 'file', messageAr: 'امتداد الصورة لا يطابق محتواها أو الصورة تالفة — استخدم PNG/JPG سليماً' }]);
+  }
+  if (dimensions.width * dimensions.height > MAX_OCR_PIXELS) {
+    throw ERR.VALIDATION([{ field: 'file', messageAr: 'أبعاد الصورة كبيرة جداً للقراءة الآلية — صغّرها ثم أعد المحاولة' }]);
+  }
+}
 
 async function tessDataDir(): Promise<string> {
   // النماذج تأتي من حزم npm محلية — تُنسخ لمجلد واحد يقرأه المحرك (أول مرة فقط)
@@ -33,7 +72,10 @@ async function getWorker(): Promise<OcrWorker> {
       const langPath = await tessDataDir();
       const worker = await createWorker('ara+eng', 1, { langPath, gzip: true, cacheMethod: 'none' });
       return worker as unknown as OcrWorker;
-    })();
+    })().catch((error: unknown) => {
+      workerPromise = null;
+      throw error;
+    });
   }
   return workerPromise;
 }
@@ -42,7 +84,14 @@ async function getWorker(): Promise<OcrWorker> {
 
 const DATE_RE = /\b(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4})\b/;
 const NUM_RE = /-?\d{1,3}(?:,\d{3})+(?:\.\d{1,4})?|-?\d+(?:\.\d{1,4})?/g;
-const OPENING_HINT = /(منقول|فتتاحي|رصيد|opening\s*balance|b\/f)/i; // «فتتاحي» تلتقط افتتاحي والإفتتاحي
+const normalizeNumerals = (text: string): string => text
+  .replace(/[\u0660-\u0669]/g, (digit) => String(digit.charCodeAt(0) - 0x0660))
+  .replace(/[\u06f0-\u06f9]/g, (digit) => String(digit.charCodeAt(0) - 0x06f0))
+  .replace(/\u066b/g, '.')
+  .replace(/\u066c/g, ',');
+export const normalizeConfidence = (confidence: number | undefined): number | null =>
+  confidence == null || !Number.isFinite(confidence) ? null : Math.max(0, Math.min(1, confidence / 100));
+const OPENING_HINT = /(منقول|فتتاحي|رصيد\s*(?:أول|اول|بداية|سابق)|opening\s*balance|b\/f)/i;
 const CLOSING_HINT = /(ختامي|ختامية|نهائي|إجمالي|اجمالي|المجموع|closing\s*balance|c\/f)/i;
 
 const toNum = (raw: string): number | null => {
@@ -156,12 +205,13 @@ function textLayerLines(items: Array<{ str?: string; transform: number[] }>): st
 
 /** تحليل أسطر نصية إلى بنود إرشادية للمراجعة — يفصل الترويسات/الافتتاحي/الختامي عن البنود.
  *  مشتركة بين استخراج PDF واستخراج الصور (نفس منطق التحليل لضمان اتساق النتائج). */
-function parseAll(raws: string[], conf: number | null, opts?: { requireDate?: boolean }) {
+export function parseOcrLines(raws: string[], conf: number | null, opts?: { requireDate?: boolean }) {
   const requireDate = opts?.requireDate ?? true;
   const out: OcrLine[] = [];
   let op: number | null = null;
   let prev: number | null = null; // سلسلة الرصيد المجمع لكشوف التفصيل
-  for (const raw of raws) {
+  for (const source of raws) {
+    const raw = normalizeNumerals(source);
     // ترويسات وتذييلات الكشف (تلفون/فاكس/طباعة/صفحة/عناوين/إجماليات) — ليست بنوداً أبداً
     if (isHeaderLine(raw)) continue;
     if (CLOSING_HINT.test(raw)) continue;
@@ -212,6 +262,12 @@ function parseAll(raws: string[], conf: number | null, opts?: { requireDate?: bo
 }
 
 export class OcrService {
+  async close(): Promise<void> {
+    const worker = workerPromise;
+    workerPromise = null;
+    if (worker) await (await worker).terminate();
+  }
+
   /** استخراج بنود كشف PDF — نص رقمي مباشر إن وُجد، وإلا OCR محلي للصور الممسوحة */
   async extractPdf(buffer: Buffer): Promise<OcrResult> {
     if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
@@ -256,22 +312,21 @@ export class OcrService {
 
     type PdfPage = Awaited<ReturnType<typeof doc.getPage>>;
 
-    // جودة الصفحة: عدد البنود القابلة للاستخدام (مدين+دائن معاً عرف محاسبي مشروع وليس عيباً)
-    const score = (ls: OcrLine[]) => ls.length;
-
-    let confidence: number | null = null;
-    const ocrPageLines = async (page: PdfPage): Promise<string[]> => {
+    const ocrPageLines = async (page: PdfPage): Promise<{ lines: string[]; confidence: number | null }> => {
+      const viewport = page.getViewport({ scale: 2.2 }); // ≈200dpi — توازن دقة/سرعة
+      if (!Number.isFinite(viewport.width * viewport.height) || viewport.width <= 0 || viewport.height <= 0 ||
+          Math.ceil(viewport.width) * Math.ceil(viewport.height) > MAX_OCR_PIXELS) {
+        throw ERR.VALIDATION([{ field: 'file', messageAr: 'أبعاد صفحة PDF كبيرة جداً للقراءة الآلية — صغّر الصفحة ثم أعد المحاولة' }]);
+      }
       const { createCanvas } = await import('@napi-rs/canvas');
       const worker = await getWorker();
-      const viewport = page.getViewport({ scale: 2.2 }); // ≈200dpi — توازن دقة/سرعة
       const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvasContext: ctx, viewport, canvas }).promise;
       const { data } = await worker.recognize(canvas.toBuffer('image/png'));
-      confidence = confidence == null ? (data.confidence ?? null) : (confidence + (data.confidence ?? 0)) / 2;
-      return data.text.split(/\r?\n/);
+      return { lines: data.text.split(/\r?\n/), confidence: normalizeConfidence(data.confidence) };
     };
 
     // الحل الجذري لكل أنواع الـPDF: قرار لكل صفحة على حدة — نص إن كانت صالحة، وإلا تصوير + OCR
@@ -279,14 +334,14 @@ export class OcrService {
     const lines: OcrLine[] = [];
     let opening: number | null = null;
     let usedOcr = false;
+    let ocrPages = 0;
 
     for (let p = 1; p <= doc.numPages; p++) {
       let page: PdfPage;
       try {
         page = await doc.getPage(p);
       } catch {
-        diag.push(`ص${p}:تالفة-تجاوز`);
-        continue;
+        throw ERR.VALIDATION([{ field: 'file', messageAr: `تعذرت قراءة صفحة PDF رقم ${p} — لم يُعتمد كشف ناقص. أعد تصدير الملف` }]);
       }
       let textRaw: string[] = [];
       try {
@@ -296,29 +351,37 @@ export class OcrService {
         textRaw = [];
       }
       const chars = textRaw.join(' ').replace(/[^\p{L}\p{N}]/gu, '').length;
-      const textParsed = parseAll(textRaw, null);
+      const textParsed = parseOcrLines(textRaw, null);
       let chosen = textParsed;
       let pageMode = 'نص';
 
-      const needOcr =
-        chars < 25 || textParsed.lines.length === 0 || score(textParsed.lines) < textParsed.lines.length * 0.6;
+      const needOcr = textParsed.lines.length === 0;
       if (needOcr) {
+        if (ocrPages >= MAX_OCR_PAGES) {
+          throw ERR.VALIDATION([{ field: 'file', messageAr: `الكشف يتطلب قراءة آلية لأكثر من ${MAX_OCR_PAGES} صفحة — قسّمه أو صدّره Excel/CSV` }]);
+        }
+        ocrPages++;
         try {
-          const ocrParsed = parseAll(await ocrPageLines(page), confidence, { requireDate: true });
-          usedOcr = true;
-          if (score(ocrParsed.lines) >= score(chosen.lines)) {
+          const recognized = await ocrPageLines(page);
+          const ocrParsed = parseOcrLines(recognized.lines, recognized.confidence, { requireDate: true });
+          if (ocrParsed.lines.length >= chosen.lines.length) {
             chosen = ocrParsed;
             pageMode = 'OCR';
+            usedOcr = true;
           } else {
             pageMode = 'نص-أفضل';
           }
         } catch (e) {
-          pageMode = `فشل-OCR:${e instanceof Error ? e.message.slice(0, 30) : '?'}`;
+          if (e instanceof AppError) throw e;
+          throw ERR.VALIDATION([{ field: 'file', messageAr: `تعذرت قراءة صفحة PDF رقم ${p} آلياً — لم يُعتمد كشف ناقص. أعد تصدير الملف أو جرّب صورة أوضح` }]);
         }
+      }
+      if (chosen.lines.length === 0) {
+        throw ERR.VALIDATION([{ field: 'file', messageAr: `لم يُستخرج أي بند من صفحة PDF رقم ${p} — لم يُعتمد كشف ناقص. تحقق منها أو قسّم الملف` }]);
       }
       diag.push(`ص${p}:[${pageMode} نص=${chars}ح بنود=${chosen.lines.length}]`);
       if (opening == null && chosen.opening != null) opening = chosen.opening;
-      lines.push(...chosen.lines);
+      lines.push(...chosen.lines.map((line, index) => ({ ...line, lineNo: lines.length + index + 1 })));
     }
 
     if (lines.length === 0) {
@@ -337,7 +400,8 @@ export class OcrService {
   /** استخراج بنود كشف من صورة (PNG/JPG) — OCR محلي مباشر بنفس محرك PDF الممسوح.
    *  لا توجد «صفحات» هنا — صورة واحدة تُمرَّر للعين الإلكترونية (Tesseract المضمّن)
    *  ثم تُحلَّل بنفس منطق parseAll لضمان اتساق النتائج مع استخراج PDF. */
-  async extractImage(buffer: Buffer): Promise<OcrResult> {
+  async extractImage(buffer: Buffer, format: 'png' | 'jpeg'): Promise<OcrResult> {
+    validateOcrImage(buffer, format);
     const worker = await getWorker();
     let recognized: { data: { text: string; confidence?: number } };
     try {
@@ -349,8 +413,8 @@ export class OcrService {
       ]);
     }
     const textRaw = recognized.data.text.split(/\r?\n/);
-    const conf = recognized.data.confidence ?? null;
-    const parsed = parseAll(textRaw, conf, { requireDate: true });
+    const conf = normalizeConfidence(recognized.data.confidence);
+    const parsed = parseOcrLines(textRaw, conf, { requireDate: true });
     if (parsed.lines.length === 0) {
       throw ERR.VALIDATION([
         {

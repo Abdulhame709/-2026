@@ -8,12 +8,12 @@ import type { AuditRepository } from '../infrastructure/repositories/audit.repos
 /**
  * محرّك اقتراحات المطابقة (Module 4) — يجري قواعد الحساب بالترتيب المخزن:
  * exact_ref → ref_map → description_ref → amount_date، ثم التوزيع الجشع
- * (دفعة ↔ عدة فواتير، الأكبر أولاً). Q11: المبلغ يساوي بالضبط (±0.005) دائماً —
+ * (دفعة ↔ عدة فواتير، الأكبر أولاً). المبلغ يساوي بدقة التخزين (أربع منازل) —
  * نافذة الأيام تخص التاريخ وحدها، وما خارجها يُقترح بثقة منخفضة ليحكمه الإنسان.
  * الاقتراحات حالة «suggested» — القبول/الرفض/الربط اليدوي قرار المستخدم.
  */
 
-const EPS = 0.005;
+const EPS = 0.00005;
 
 /** ثقة القواعد — تُعرض للمراجع كدليل لا كضمان */
 export const RULE_CONFIDENCE: Record<Group['rule'], number> = {
@@ -27,7 +27,7 @@ export const RULE_CONFIDENCE: Record<Group['rule'], number> = {
 const normRef = (s: string | null | undefined): string =>
   (s ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
 
-const amtKey = (n: number): string => Math.abs(n).toFixed(2);
+const amtKey = (amount: number): string => Math.abs(amount).toFixed(4);
 
 const dateDiffDays = (a: string | null, b: string | null): number => {
   if (!a || !b) return Number.MAX_SAFE_INTEGER;
@@ -251,10 +251,17 @@ export class MatchingService {
     greedySplit(our.filter((l) => l.signed < -EPS), their.filter((l) => l.signed > EPS), 'our');
     greedySplit(their.filter((l) => l.signed < -EPS), our.filter((l) => l.signed > EPS), 'their');
 
+    const balanced = proposed.filter((group) =>
+      Math.abs(
+        group.ourItems.reduce((sum, item) => sum + item.portion, 0) -
+        group.theirItems.reduce((sum, item) => sum + item.portion, 0),
+      ) <= EPS,
+    );
+
     await this.matches.createGroups(
       sessionId,
       actorId,
-      proposed.map((p) => ({
+      balanced.map((p) => ({
         rule: p.rule,
         confidence: p.confidence,
         status: (p.deterministic && mode === 'auto' ? 'confirmed' : 'suggested') as 'suggested' | 'confirmed',
@@ -273,11 +280,11 @@ export class MatchingService {
       action: 'MATCH_SUGGEST',
       entityType: 'session',
       entityId: String(sessionId),
-      after: { suggested: proposed.length },
+      after: { suggested: balanced.length },
       ip,
     });
-    const autoConfirmed = proposed.filter((p) => p.deterministic && mode === 'auto').length;
-    return { suggested: proposed.length - autoConfirmed, autoConfirmed };
+    const autoConfirmed = balanced.filter((p) => p.deterministic && mode === 'auto').length;
+    return { suggested: balanced.length - autoConfirmed, autoConfirmed };
   }
 
   /** تحقق مالي موحد لمجموعة: توازن صفر + سعة كل بند + انتماء البنود للجلسة */

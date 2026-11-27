@@ -66,6 +66,18 @@ echo.
 echo [3/5] Checking database "reconciliation"...
 psql -U postgres -d reconciliation -c "SELECT 1;" >nul 2>&1
 if !errorlevel! neq 0 (
+    if /I not "!NODE_ENV!"=="development" (
+        echo  [X] Set NODE_ENV=development before development database setup
+        pause
+        exit /b 1
+    )
+    if not defined SEED_ADMIN_PASSWORD (
+        echo  [X] Set SEED_ADMIN_PASSWORD, SEED_RECONCILER_PASSWORD and SEED_VIEWER_PASSWORD first
+        pause
+        exit /b 1
+    )
+    if not defined SEED_RECONCILER_PASSWORD exit /b 1
+    if not defined SEED_VIEWER_PASSWORD exit /b 1
     echo       Database missing - creating and seeding...
     psql -U postgres -c "CREATE DATABASE reconciliation;" >nul 2>&1
     if !errorlevel! neq 0 (
@@ -76,27 +88,34 @@ if !errorlevel! neq 0 (
     )
     pushd backend
     call npm run db:migrate
+    if !errorlevel! neq 0 exit /b 1
     call npm run db:seed
+    if !errorlevel! neq 0 exit /b 1
     popd
 )
 echo       OK
 echo.
 
 echo [4/5] Starting backend server...
-start "Backend - DO NOT CLOSE" cmd /k "cd /d %~dp0backend && npm run dev"
+if exist "%LOCALAPPDATA%\Mushabaka\backup-key.dpapi" (
+    start "Backend - DO NOT CLOSE" cmd /k "cd /d %~dp0backend && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start-with-backup-key.ps1"
+) else (
+    echo       Backup key is not configured - encrypted backups are unavailable
+    start "Backend - DO NOT CLOSE" cmd /k "cd /d %~dp0backend && npm run dev"
+)
 timeout /t 8 /nobreak >nul
 
 echo [5/5] Starting frontend...
 start "Frontend - DO NOT CLOSE" cmd /k "cd /d %~dp0frontend && npm run dev"
 timeout /t 8 /nobreak >nul
-start http://localhost:5173
+start http://127.0.0.1:5173
 
 color 0A
 echo.
 echo ================================================================
 echo    [OK] System started!
-echo    Browser:  http://localhost:5173
-echo    Login:    admin / Admin@2026
+echo    Browser:  http://127.0.0.1:5173
+echo    Login:    admin / the password supplied for setup
 echo    Do NOT close the two server windows
 echo ================================================================
 echo.

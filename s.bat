@@ -69,6 +69,18 @@ echo.
 echo [3/5] فحص وجود قاعدة البيانات "reconciliation"...
 psql -U postgres -d reconciliation -c "SELECT 1;" >nul 2>&1
 if !errorlevel! neq 0 (
+    if /I not "!NODE_ENV!"=="development" (
+        echo  *** اضبط NODE_ENV=development قبل تهيئة قاعدة التطوير ***
+        pause
+        exit /b 1
+    )
+    if not defined SEED_ADMIN_PASSWORD (
+        echo  *** عين SEED_ADMIN_PASSWORD وSEED_RECONCILER_PASSWORD وSEED_VIEWER_PASSWORD قبل التشغيل ***
+        pause
+        exit /b 1
+    )
+    if not defined SEED_RECONCILER_PASSWORD exit /b 1
+    if not defined SEED_VIEWER_PASSWORD exit /b 1
     echo       القاعدة غير موجودة - جاري إنشاءها وتجهيزها...
     psql -U postgres -c "CREATE DATABASE reconciliation;" >nul 2>&1
     if !errorlevel! neq 0 (
@@ -79,7 +91,9 @@ if !errorlevel! neq 0 (
     )
     cd backend
     call npm run db:migrate
+    if !errorlevel! neq 0 exit /b 1
     call npm run db:seed
+    if !errorlevel! neq 0 exit /b 1
     cd ..
 )
 echo       OK
@@ -87,7 +101,12 @@ echo.
 
 :: ============ 4) تشغيل الخادم والواجهة ============
 echo [4/5] تشغيل الخادم (backend) في نافذة مستقلة...
-start "خادم النظام - لا تغلق هذه النافذة" cmd /k "cd /d %~dp0backend && npm run dev"
+if exist "%LOCALAPPDATA%\Mushabaka\backup-key.dpapi" (
+    start "خادم النظام - لا تغلق هذه النافذة" cmd /k "cd /d %~dp0backend && powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start-with-backup-key.ps1"
+) else (
+    echo       مفتاح النسخ غير معد - الموقع يعمل لكن إنشاء النسخ المشفرة غير متاح
+    start "خادم النظام - لا تغلق هذه النافذة" cmd /k "cd /d %~dp0backend && npm run dev"
+)
 
 echo       انتظار جاهزية الخادم...
 timeout /t 8 /nobreak >nul
@@ -98,7 +117,7 @@ start "واجهة النظام - لا تغلق هذه النافذة" cmd /k "cd
 :: ============ 5) فتح المتصفح ============
 echo       انتظار جاهزية الواجهة ثم فتح المتصفح...
 timeout /t 7 /nobreak >nul
-start http://localhost:5173
+start http://127.0.0.1:5173
 
 :: ============ النهاية ============
 color 0A
@@ -106,8 +125,8 @@ echo.
 echo ================================================================
 echo    ✔ تم تشغيل النظام بنجاح!
 echo.
-echo    المتصفح فتح على العنوان: http://localhost:5173
-echo    تسجيل الدخول:  admin  /  Admin@2026
+echo    المتصفح فتح على العنوان: http://127.0.0.1:5173
+echo    تسجيل الدخول: حساب المدير النشط بكلمة مروره الخاصة
 echo.
 echo    ملاحظات مهمة:
 echo    - لا تغلق نافذتي "خادم النظام" و "واجهة النظام"
