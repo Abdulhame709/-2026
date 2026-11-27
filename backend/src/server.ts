@@ -148,6 +148,9 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 const PORT = Number(process.env.PORT ?? 3000);
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`✅ الخادم يعمل على http://127.0.0.1:${PORT} — /api/v1/health`);
+// HOST يبقى loopback افتراضياً (الوضع المحلي الآمن). في السحابة: إما وكيل HTTPS
+// على نفس الجهاز (يبقى 127.0.0.1) أو حاوية خلف موازن حمل (HOST=0.0.0.0).
+const HOST = process.env.HOST?.trim() || '127.0.0.1';
+app.listen(PORT, HOST, () => {
+  console.log(`✅ الخادم يعمل على http://${HOST}:${PORT} — /api/v1/health`);
 });

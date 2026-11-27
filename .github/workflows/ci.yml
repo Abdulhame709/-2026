@@ -59,6 +59,7 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
       - run: npm run test:users
+      - run: npm run test:create-admin
       - run: npm run test:statements-http
       - run: npm run test:backup-restore
       # OCR يحتاج تنزيل بيانات Tesseract المحلية؛ يُبقى منفصلاً لتحديد سبب الفشل بسرعة
@@ -79,3 +80,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run build
+      - name: فحص أصول تطبيق الهاتف (PWA)
+        run: |
+          node --check public/sw.js
+          node -e "const fs=require('fs');const m=JSON.parse(fs.readFileSync('public/manifest.webmanifest','utf8'));if(!m.icons||!m.icons.length)throw new Error('manifest has no icons');for(const i of m.icons){if(!fs.existsSync('public'+i.src))throw new Error('missing icon '+i.src)}"
