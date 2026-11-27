@@ -1,7 +1,7 @@
 # دليل التشغيل اليومي — وفاق الموردين
 
 > هذا الدليل للإجراءات التشغيلية على جهاز Windows واحد (خادم داخلي). لا يحتوي أسرارًا؛ المفتاح وكلمات المرور تبقى خارج Git وفي مدير كلمات المرور.
-> راجع أيضًا: `docs/INSTALL-LOCAL.md` (التثبيت)، `docs/BACKUP-KEY-SETUP.md` (المفتاح)، `docs/CREDENTIAL-ROTATION.md` (التدوير)، `docs/DEPLOYMENT-SECURITY.md` (النشر)، و`docs/REMEDIATION-PLAN.md` (المتبقي).
+> راجع أيضًا: `docs/INSTALL-LOCAL.md` (التثبيت)، `docs/BACKUP-KEY-SETUP.md` (المفتاح)، `docs/CREDENTIAL-ROTATION.md` (التدوير)، `docs/DEPLOYMENT-SECURITY.md` (النشر)، `docs/CLOUD-DEPLOYMENT.md` (السحابة وتطبيق الهاتف)، و`docs/REMEDIATION-PLAN.md` (المتبقي).
 
 ## 1. المتطلبات قبل البدء
 
@@ -16,6 +16,7 @@
 |---|---|---|
 | `NODE_ENV` | `production` للتشغيل، `development` للبذور فقط | البذور لا تعمل خارج التطوير |
 | `PORT` | `3000` افتراضيًا | منفذ الخادم |
+| `HOST` | `127.0.0.1` افتراضيًا | في السحابة خلف وكيل محلي يبقى loopback؛ داخل حاوية استخدم `0.0.0.0` |
 | `ISSUE_BEARER_TOKEN` | `on` فقط عند الحاجة لترويسة بديلة | وإلا الكوكي وحده |
 | `COOKIE_SAMESITE` | `strict` افتراضيًا (`lax`/`none` يتطلبان HTTPS) | حماية CSRF |
 | `TRUST_PROXY` | `loopback` فقط خلف وكيل محلي | وإلا يُتجاهل `X-Forwarded-*` |
@@ -65,6 +66,9 @@ powershell -ExecutionPolicy Bypass -File scripts/start-with-backup-key.ps1 -Mode
   ```
   الخطوات التفصيلية والتحقق في `docs/CREDENTIAL-ROTATION.md`. لا تُرسل الكلمة الجديدة بالبريد أو في Git.
 - بعد التدوير: تحقق من رفض الكلمة القديمة، ومن إبطال الجلسات، وسجّل الحدث في سجل التدقيق (`CREDENTIAL_ROTATION`).
+- **أول مدير في قاعدة جديدة (سحابة):** `db:seed` للتطوير فقط. استخدم
+  `npm run db:create-admin -- --apply` مع `ADMIN_USERNAME`/`ADMIN_PASSWORD`/`ADMIN_CONFIRM`
+  كما في `docs/CLOUD-DEPLOYMENT.md`؛ يُنشأ الحساب بتغيير كلمة مرور إلزامي.
 
 ## 6. قبل إتاحة النظام على الشبكة
 
@@ -73,6 +77,8 @@ powershell -ExecutionPolicy Bypass -File scripts/start-with-backup-key.ps1 -Mode
 - [ ] تشديد أذونات `backend/storage/backups` و`backend/storage/uploads` (إزالة منح `Modify` لغير حساب الخدمة) بعد نسخة.
 - [ ] نسخة مشفرة شاملة خارج الجهاز + بروفة استعادة على بيانات منزوعة الحساسية.
 - [ ] مراجعة `docs/REMEDIATION-PLAN.md` والتأكد من إغلاق البنود الأمنية.
+- [ ] إن كان النشر سحابياً: اتبع `docs/CLOUD-DEPLOYMENT.md` (نطاق + HTTPS + أصل واحد + تخزين دائم)،
+      وثبّت التطبيق على الهاتف من المتصفح للتحقق من PWA.
 
 ## 7. استكشاف الأخطاء السريع
 

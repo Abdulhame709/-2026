@@ -13,3 +13,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <AppProviders />
   </BrowserRouter>,
 );
+
+// تسجيل عامل الخدمة في نسخة البناء فقط (PWA). التطوير يبقى بلا تخزين مؤقت
+// حتى لا تظهر نسخ قديمة أثناء العمل، ولا يقع التسجيل إلا على أصل آمن (HTTPS أو localhost).
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+  });
+}
