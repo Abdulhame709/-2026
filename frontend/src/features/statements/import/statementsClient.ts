@@ -25,9 +25,14 @@ export interface UploadPreview {
   closingHint: number | null;
   templateId: number | null;
   lineCount: number;
+  /** صفوف ترويسة/مجاميع/أرصدة تُخطّيت — تُعرض للمستخدم للشفافية */
+  ignoredRows: number;
   sheetName: string;
+  sheetNames: string[];
   decimalSep: string;
   thousandSep: string;
+  dateFormats: string[];
+  dateFormat: string;
   mapping?: Record<string, string>;
 }
 
@@ -62,6 +67,8 @@ export interface InspectResult {
   mapping: Partial<Record<MappingField, string>>;
   decimalSep: string;
   thousandSep: string;
+  /** الصيغ المقترحة (الأرجح أولاً) لعمود التاريخ — أولها يُعرض في القائمة */
+  dateFormats: string[];
   warnings: string[];
 }
 
@@ -70,6 +77,8 @@ export interface UploadOptions {
   headerRows?: number | null;
   decimalSep?: string;
   thousandSep?: string;
+  dateFormat?: string;
+  sheetName?: string | null;
   saveTemplate?: { name: string; isDefault: boolean } | null;
 }
 
@@ -127,11 +136,16 @@ export function commitManualStatement(
 }
 
 /** فحص الملف: التعرّف على الأعمدة واقتراح التعيين قبل الرفع — لا كتابة في القاعدة */
-export function inspectStatementFile(accountId: number, side: StatementSide, file: File): Promise<InspectResult> {
-  return uploadFile<{ inspection: InspectResult }>('/api/v1/statements/inspect', file, {
-    accountId: String(accountId),
-    side,
-  }).then((result) => result.inspection);
+export function inspectStatementFile(
+  accountId: number,
+  side: StatementSide,
+  file: File,
+  sheetName?: string | null,
+): Promise<InspectResult> {
+  const fields: Record<string, string> = { accountId: String(accountId), side };
+  if (sheetName) fields.sheetName = sheetName;
+  return uploadFile<{ inspection: InspectResult }>('/api/v1/statements/inspect', file, fields)
+    .then((result) => result.inspection);
 }
 
 /** رفع ملف كشف → معاينة قابلة للتصحيح (لا يُكتب شيء في القاعدة بعد) */
@@ -151,6 +165,8 @@ export function uploadStatementPreview(
   if (options.headerRows != null) fields.headerRows = String(options.headerRows);
   if (options.decimalSep) fields.decimalSep = options.decimalSep;
   if (options.thousandSep) fields.thousandSep = options.thousandSep;
+  if (options.dateFormat) fields.dateFormat = options.dateFormat;
+  if (options.sheetName) fields.sheetName = options.sheetName;
   if (options.saveTemplate) fields.saveTemplate = JSON.stringify(options.saveTemplate);
   return uploadFile<UploadPreview>('/api/v1/statements/upload', file, fields);
 }

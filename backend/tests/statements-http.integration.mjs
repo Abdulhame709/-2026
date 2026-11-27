@@ -106,6 +106,8 @@ try {
     date: 'A', docType: 'B', docNo: 'C', description: 'D', ref: 'E', debit: 'F', credit: 'G', currency: 'H',
   });
   assert.ok(inspection.warnings.some((warning) => warning.includes('العملة')));
+  assert.equal(inspection.dateFormats[0], 'YYYY-MM-DD');
+  assert.equal(inspection.sheetName, 'Sheet1');
 
   // 2) الرفع بخريطة مؤكدة وحفظ القالب
   const uploadResponse = await postFile('/upload', {
@@ -116,12 +118,17 @@ try {
     headerRows: 1,
     decimalSep: inspection.decimalSep,
     thousandSep: inspection.thousandSep,
+    dateFormat: inspection.dateFormats[0],
+    sheetName: inspection.sheetName,
     saveTemplate: JSON.stringify({ name: 'ملف مورد 8 أعمدة', isDefault: true }),
   });
   assert.equal(uploadResponse.status, 201, JSON.stringify(await uploadResponse.clone().json()));
   const preview = await uploadResponse.json();
   assert.equal(preview.lineCount, 2);
   assert.equal(preview.mapping.date, 'A');
+  assert.equal(preview.dateFormat, 'YYYY-MM-DD');
+  assert.deepEqual(preview.sheetNames, ['Sheet1']);
+  assert.equal(preview.ignoredRows, 0);
   assert.deepEqual([preview.lines[0].debitRaw, preview.lines[0].creditRaw], ['1465', '']);
   assert.ok(preview.templateId > 0);
   const savedTemplate = await pool.query('SELECT account_id,template_kind,columns_mapping FROM import_templates WHERE id=$1', [preview.templateId]);

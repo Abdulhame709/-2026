@@ -54,6 +54,8 @@ const uploadFields = z.object({
   ),
   decimalSep: z.enum(['.', ',']).optional(),
   thousandSep: z.enum(['.', ',']).optional(),
+  dateFormat: z.enum(['YYYY-MM-DD', 'DD/MM/YYYY', 'MM/DD/YYYY', 'DD-MM-YYYY', 'DD.MM.YYYY', 'YYYY/MM/DD']).optional(),
+  sheetName: z.string().trim().min(1).max(120).optional(),
   saveTemplate: jsonField(
     z
       .object({
@@ -126,7 +128,10 @@ export function statementsRoutes(svc: StatementService, matchingSvc: MatchingSer
       res.status(422).json({ error: { code: 'VALIDATION_FAILED', messageAr: 'أرفق ملف الكشف في الحقل file' } });
       return;
     }
-    res.status(201).json({ inspection: await svc.inspect(file) });
+    const { sheetName } = z
+      .object({ sheetName: z.string().trim().min(1).max(120).optional() })
+      .parse(req.body ?? {});
+    res.status(201).json({ inspection: await svc.inspect(file, sheetName) });
   });
 
   router.post('/upload', requireAuth, canWrite, upload.single('file'), async (req, res: Response) => {
