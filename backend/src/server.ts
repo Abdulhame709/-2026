@@ -44,7 +44,7 @@ import { TemplatesRepository } from './infrastructure/repositories/templates.rep
  */
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', process.env.TRUST_PROXY === 'loopback' ? 'loopback' : false);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '10mb' }));
 
@@ -104,6 +104,26 @@ app.use(sessionMiddleware(authService));
 
 const api = express.Router();
 
+api.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = req.get('origin');
+  const host = req.get('host');
+  const fetchSite = req.get('sec-fetch-site');
+  if ((origin && origin !== `${req.protocol}://${host}`) || (!origin && (req.headers.cookie || (fetchSite && fetchSite !== 'same-origin')))) {
+    res.status(403).json({ error: { code: 'INVALID_ORIGIN', messageAr: 'مصدر الطلب غير مسموح' } });
+    return;
+  }
+  next();
+});
+
+api.use((req, res, next) => {
+  if (req.user?.mustChangePassword && !['/auth/me', '/auth/logout', '/auth/change-password'].includes(req.path)) {
+    res.status(403).json({ error: { code: 'PASSWORD_CHANGE_REQUIRED', messageAr: 'يجب تغيير كلمة المرور قبل متابعة العمل' } });
+    return;
+  }
+  next();
+});
+
 api.get('/health', async (_req, res) => {
   const db = await pool.query('SELECT 1');
   res.json({ status: 'ok', db: db.rowCount === 1 ? 'up' : 'down', version: '0.1.0' });
@@ -128,6 +148,6 @@ app.use(notFoundHandler);
 app.use(errorHandler);
 
 const PORT = Number(process.env.PORT ?? 3000);
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ الخادم يعمل على http://0.0.0.0:${PORT} — /api/v1/health`);
+app.listen(PORT, '127.0.0.1', () => {
+  console.log(`✅ الخادم يعمل على http://127.0.0.1:${PORT} — /api/v1/health`);
 });

@@ -22,16 +22,9 @@ export function sessionMiddleware(authService: AuthService) {
           .find((c) => c.startsWith(`${SESSION_COOKIE}=`))
           ?.slice(SESSION_COOKIE.length + 1)
       : undefined;
-    // قناة بديلة 1: Authorization: Bearer <sid> — لمتصفحات ترفض الكوكيز داخل iframe
     const authz = req.headers.authorization;
     const bearerSession = authz?.startsWith('Bearer ') ? authz.slice(7).trim() : undefined;
-    // قناة بديلة 2: ?sid=<sid> في الرابط — بوابة نفق المعاينة تَنزِع ترويسة Authorization
-    // أثناء العبور (مُثبت بسجل الخادم)، أما معامل الاستعلام فلا تلمسه أي بوابة.
-    // الأولوية: الكوكي (الإنتاج) ثم Bearer ثم sid. ملاحظة أمان: sid في الرابط قد
-    // يظهر بسجلات الوسطاء — مقبول لبيئة المعاينة، والإنتاج الداخلي يعتمد الكوكي.
-    const qs = req.query as { sid?: unknown };
-    const sidQuery = typeof qs.sid === 'string' && qs.sid ? qs.sid : undefined;
-    const sessionId = cookieSession ?? bearerSession ?? sidQuery;
+    const sessionId = cookieSession ?? bearerSession;
 
     if (sessionId) {
       try {

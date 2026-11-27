@@ -15,7 +15,7 @@ export async function login(username: string, password: string): Promise<AppUser
     username,
     password,
   });
-  // قناة بديلة للإطارات المقيّدة: يأتي الرمز فقط حين يعلم الخادم أن الكوكي مرفوض
+  // رمز اختياري بإعداد صريح من الخادم؛ يحتفظ به العميل في الذاكرة لهذه الصفحة فقط
   storeSessionToken(token ?? null);
   return user;
 }

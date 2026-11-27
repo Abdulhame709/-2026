@@ -1,6 +1,7 @@
 import { hash as argon2hash, verify as argon2verify } from '@node-rs/argon2';
 import type { Pool } from 'pg';
 import type { PublicUser, User, UserRole } from '../../domain/user.js';
+import { ERR } from '../../domain/errors.js';
 
 /**
  * مستودع المستخدمين — التنفيذ الوحيد المعتمد على pg.
@@ -64,20 +65,20 @@ export class UsersRepository {
 
   async findByUsername(username: string): Promise<User | null> {
     const { rows } = await this.pool.query<UserRow>(
-      'SELECT * FROM users WHERE lower(username) = lower($1)',
+      'SELECT * FROM users WHERE lower(username) = lower($1) AND deleted_at IS NULL',
       [username],
     );
     return rows[0] ? toUser(rows[0]) : null;
   }
 
   async findById(id: number): Promise<User | null> {
-    const { rows } = await this.pool.query<UserRow>('SELECT * FROM users WHERE id = $1', [id]);
+    const { rows } = await this.pool.query<UserRow>('SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL', [id]);
     return rows[0] ? toUser(rows[0]) : null;
   }
 
   async listAll(): Promise<PublicUser[]> {
     const { rows } = await this.pool.query<UserRow>(
-      'SELECT * FROM users ORDER BY is_active DESC, id',
+      'SELECT * FROM users WHERE deleted_at IS NULL ORDER BY is_active DESC, id',
     );
     return rows.map((r) => toPublic(toUser(r)));
   }
@@ -90,32 +91,145 @@ export class UsersRepository {
     createdBy: number;
     mustChangePassword?: boolean;
   }): Promise<PublicUser> {
-    const { rows } = await this.pool.query<UserRow>(
-      `INSERT INTO users (username, password_hash, full_name, role, must_change_password)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING *`,
-      [input.username, input.passwordHash, input.fullName, input.role, input.mustChangePassword ?? true],
-    );
-    return toPublic(toUser(rows[0]));
+    try {
+      const { rows } = await this.pool.query<UserRow>(
+        `INSERT INTO users (username, password_hash, full_name, role, must_change_password)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [input.username, input.passwordHash, input.fullName, input.role, input.mustChangePassword ?? true],
+      );
+      return toPublic(toUser(rows[0]));
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') throw ERR.USERNAME_TAKEN();
+      throw error;
+    }
+  }
+
+  async updateManaged(
+    id: number,
+    actorId: number,
+    input: { username: string; fullName: string; role: UserRole },
+    ip: string | null,
+  ): Promise<PublicUser | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const current = await client.query<UserRow>('SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL FOR UPDATE', [id]);
+      if (!current.rows[0]) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const oldUser = current.rows[0];
+      const updated = await client.query<UserRow>(
+        'UPDATE users SET username = $2, full_name = $3, role = $4 WHERE id = $1 RETURNING *',
+        [id, input.username, input.fullName, input.role],
+      );
+      if (oldUser.username !== input.username || oldUser.role !== input.role) {
+        await client.query('UPDATE auth_sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+      }
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity_type, entity_id, before, after, ip)
+         VALUES ($1, 'USER_UPDATE', 'user', $2, $3::jsonb, $4::jsonb, $5::inet)`,
+        [actorId, String(id), JSON.stringify({ username: oldUser.username, fullName: oldUser.full_name, role: oldUser.role }),
+          JSON.stringify({ username: input.username, fullName: input.fullName, role: input.role }), ip],
+      );
+      await client.query('COMMIT');
+      return toPublic(toUser(updated.rows[0]));
+    } catch (error) {
+      await client.query('ROLLBACK');
+      if ((error as { code?: string }).code === '23505') throw ERR.USERNAME_TAKEN();
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async archive(id: number, actorId: number, ip: string | null): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query<UserRow>(
+        `UPDATE users SET is_active = false, must_change_password = true, deleted_at = now()
+         WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+        [id],
+      );
+      if (!rows[0]) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      await client.query('UPDATE auth_sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+      await client.query(
+        `INSERT INTO audit_log (actor_id, action, entity_type, entity_id, after, ip)
+         VALUES ($1, 'USER_ARCHIVE', 'user', $2, $3::jsonb, $4::inet)`,
+        [actorId, String(id), JSON.stringify({ username: rows[0].username, role: rows[0].role }), ip],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async setActive(id: number, isActive: boolean): Promise<PublicUser | null> {
     const { rows } = await this.pool.query<UserRow>(
-      `UPDATE users SET is_active = $2 WHERE id = $1 RETURNING *`,
+      `UPDATE users SET is_active = $2 WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
       [id, isActive],
     );
     return rows[0] ? toPublic(toUser(rows[0])) : null;
   }
 
-  async setMustChangePassword(id: number, must: boolean): Promise<void> {
-    await this.pool.query('UPDATE users SET must_change_password = $2 WHERE id = $1', [id, must]);
+  async replacePassword(id: number, oldHash: string, newHash: string, currentSessionId: string, ip: string | null): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const updated = await client.query(
+        'UPDATE users SET password_hash = $3, must_change_password = false, failed_attempts = 0, locked_until = NULL WHERE id = $1 AND password_hash = $2 AND deleted_at IS NULL',
+        [id, oldHash, newHash],
+      );
+      if (!updated.rowCount) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      await client.query('UPDATE auth_sessions SET revoked_at = now() WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL', [id, currentSessionId]);
+      await client.query(
+        'INSERT INTO audit_log (actor_id, action, entity_type, entity_id, ip) VALUES ($1, $2, $3, $4, $5::inet)',
+        [id, 'PASSWORD_CHANGED', 'user', String(id), ip],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  async updatePassword(id: number, newPasswordHash: string): Promise<void> {
-    await this.pool.query(
-      'UPDATE users SET password_hash = $2, must_change_password = false WHERE id = $1',
-      [id, newPasswordHash],
-    );
+  async forcePasswordChange(id: number, actorId: number, ip: string | null): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const updated = await client.query('UPDATE users SET must_change_password = true WHERE id = $1 AND deleted_at IS NULL', [id]);
+      if (!updated.rowCount) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      await client.query('UPDATE auth_sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL', [id]);
+      await client.query(
+        'INSERT INTO audit_log (actor_id, action, entity_type, entity_id, ip) VALUES ($1, $2, $3, $4, $5::inet)',
+        [actorId, 'USER_FORCE_PASSWORD_CHANGE', 'user', String(id), ip],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /** تسجيل محاولة فاشلة + القفل عند 5 (FR-1.5) */

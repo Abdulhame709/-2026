@@ -1,5 +1,6 @@
 import { FilePdfOutlined, FileExcelOutlined, PrinterOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
+  App,
   Button,
   Card,
   Checkbox,
@@ -21,6 +22,7 @@ import { CurrencyBadge } from '@/shared/components/CurrencyBadge';
 import { SessionStatusTag } from '@/shared/components/StatusTags';
 import { listPartners } from '@/features/partners/partnersApi';
 import { getCompany } from '@/features/settings/settingsClient';
+import { openFile } from '@/shared/api/client';
 import type { CompanySettings } from '@/features/settings/settingsClient';
 import { listSessions } from '@/features/sessions/sessionsClient';
 import type { SessionListItem } from '@/features/sessions/sessionsClient';
@@ -42,6 +44,7 @@ import { ReportPaper } from './ReportPaper';
 type ReportMode = 'report' | 'letter';
 
 export function ReportsPage() {
+  const { message } = App.useApp();
   const [mode, setMode] = useState<ReportMode>('report');
   const [sections, setSections] = useState({ summary: true, discrepancies: true, signatures: true });
 
@@ -220,7 +223,7 @@ export function ReportsPage() {
                   icon={<FilePdfOutlined aria-hidden="true" />}
                   block
                   disabled={!sessionId}
-                  onClick={() => window.open(exportSessionPdf(sessionId!), '_blank')}
+                  onClick={() => openFile(exportSessionPdf(sessionId!)).catch(() => message.error('تعذر فتح التقرير'))}
                 >
                   PDF خلفي
                 </Button>
@@ -230,7 +233,7 @@ export function ReportsPage() {
                   icon={<FileExcelOutlined aria-hidden="true" />}
                   block
                   disabled={!sessionId}
-                  onClick={() => window.open(exportSessionExcel(sessionId!), '_blank')}
+                  onClick={() => openFile(exportSessionExcel(sessionId!), `session-${sessionId}.xlsx`).catch(() => message.error('تعذر تنزيل Excel'))}
                 >
                   Excel
                 </Button>

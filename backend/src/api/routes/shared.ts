@@ -9,5 +9,5 @@ export function parseId(req: Request): number {
 }
 
 export function clientIp(req: Request): string | null {
-  return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.ip ?? null;
+  return req.ip ?? null;
 }

@@ -60,7 +60,8 @@ export class AuthService {
     }
 
     await this.users.resetFailures(user.id);
-    const sessionId = await this.sessions.create(user.id, ip, null);
+    const sessionId = await this.sessions.create(user.id, user.passwordHash, ip, null);
+    if (!sessionId) throw ERR.INVALID_CREDENTIALS();
     await this.audit.write({ actorId: user.id, action: 'LOGIN', entityType: 'user', entityId: String(user.id), ip });
     return { user: toPublic(user), sessionId };
   }
@@ -87,6 +88,7 @@ export class AuthService {
     currentPassword: string,
     newPassword: string,
     ip: string | null,
+    currentSessionId: string,
   ): Promise<PublicUser> {
     const user = await this.users.findById(userId);
     if (!user) throw ERR.UNAUTHENTICATED();
@@ -95,8 +97,8 @@ export class AuthService {
     if (!ok) throw ERR.WRONG_PASSWORD();
 
     const newHash = await hashPassword(newPassword);
-    await this.users.updatePassword(userId, newHash);
-    await this.audit.write({ actorId: userId, action: 'PASSWORD_CHANGED', entityType: 'user', entityId: String(userId), ip });
+    const changed = await this.users.replacePassword(userId, user.passwordHash, newHash, currentSessionId, ip);
+    if (!changed) throw ERR.WRONG_PASSWORD();
     return toPublic({ ...user, mustChangePassword: false });
   }
 
@@ -132,6 +134,27 @@ export class AuthService {
     return created;
   }
 
+  async updateUser(
+    actor: { id: number },
+    targetId: number,
+    input: { username: string; fullName: string; role: UserRole },
+    ip: string | null,
+  ): Promise<PublicUser> {
+    if (actor.id === targetId) {
+      throw new AppError('SELF_EDIT_FORBIDDEN', 409, 'لا تعدّل حسابك من إدارة المستخدمين — استخدم شاشة تغيير كلمة المرور أو مديراً آخر');
+    }
+    const updated = await this.users.updateManaged(targetId, actor.id, input, ip);
+    if (!updated) throw ERR.NOT_FOUND();
+    return updated;
+  }
+
+  async archiveUser(actor: { id: number }, targetId: number, ip: string | null): Promise<void> {
+    if (actor.id === targetId) {
+      throw new AppError('SELF_DELETION', 409, 'لا يمكنك حذف حسابك الحالي — استعن بمدير آخر');
+    }
+    if (!await this.users.archive(targetId, actor.id, ip)) throw ERR.NOT_FOUND();
+  }
+
   async setActive(
     actor: { id: number },
     targetId: number,
@@ -155,15 +178,7 @@ export class AuthService {
   }
 
   async forcePasswordChange(actor: { id: number }, targetId: number, ip: string | null): Promise<void> {
-    const target = await this.users.findById(targetId);
-    if (!target) throw ERR.NOT_FOUND();
-    await this.users.setMustChangePassword(targetId, true);
-    await this.audit.write({
-      actorId: actor.id,
-      action: 'USER_FORCE_PASSWORD_CHANGE',
-      entityType: 'user',
-      entityId: String(targetId),
-      ip,
-    });
+    if (actor.id === targetId) throw ERR.VALIDATION([{ field: 'id', messageAr: 'غيّر كلمة مرور حسابك من شاشة تغيير كلمة المرور' }]);
+    if (!await this.users.forcePasswordChange(targetId, actor.id, ip)) throw ERR.NOT_FOUND();
   }
 }

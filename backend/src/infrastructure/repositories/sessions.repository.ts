@@ -18,14 +18,32 @@ export interface SessionInfo {
 export class AuthSessionsRepository {
   constructor(private readonly pool: Pool) {}
 
-  async create(userId: number, ip: string | null, userAgent: string | null): Promise<string> {
+  async create(userId: number, passwordHash: string, ip: string | null, userAgent: string | null): Promise<string | null> {
+    const client = await this.pool.connect();
     const id = randomUUID();
-    await this.pool.query(
-      `INSERT INTO auth_sessions (id, user_id, expires_at, ip, user_agent)
-       VALUES ($1, $2, now() + make_interval(hours => $3::int), $4::inet, $5)`,
-      [id, userId, SESSION_TTL_HOURS, ip, userAgent?.slice(0, 300) ?? null],
-    );
-    return id;
+    try {
+      await client.query('BEGIN');
+      const live = await client.query(
+        'SELECT 1 FROM users WHERE id = $1 AND password_hash = $2 AND is_active = true FOR UPDATE',
+        [userId, passwordHash],
+      );
+      if (!live.rowCount) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      await client.query(
+        `INSERT INTO auth_sessions (id, user_id, expires_at, ip, user_agent)
+         VALUES ($1, $2, now() + make_interval(hours => $3::int), $4::inet, $5)`,
+        [id, userId, SESSION_TTL_HOURS, ip, userAgent?.slice(0, 300) ?? null],
+      );
+      await client.query('COMMIT');
+      return id;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /** تُعيد userId إن كانت الجلسة حية، وتمدد انتهاءها (انزلاقي) */

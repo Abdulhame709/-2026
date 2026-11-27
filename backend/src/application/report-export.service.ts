@@ -232,7 +232,7 @@ export class ReportExportService {
 
     // الترويسة
     let logoBuf: Buffer | null = null;
-    if (company.logoFileName && /\.(png|jpe?g)$/i.test(company.logoFileName)) {
+    if (company.logoFileName && /^logo-\d+\.(?:png|jpg)$/.test(company.logoFileName)) {
       logoBuf = await readFile(path.join(UPLOAD_DIR, company.logoFileName)).catch(() => null);
     }
     if (logoBuf) {
