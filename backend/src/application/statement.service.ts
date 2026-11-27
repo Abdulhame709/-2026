@@ -49,7 +49,29 @@ export interface UploadMappingInput {
   headerRows: number | null;
   decimalSep: string | null;
   thousandSep: string | null;
+  /** الصيغة المفضلة لتفسير التاريخ (DD/MM/YYYY أو MM/DD/YYYY أو YYYY-MM-DD) */
+  dateFormat: string | null;
+  /** ورقة محددة من المصنف — تُمرَّر للتحليل بدل التخمين */
+  sheetName: string | null;
   saveTemplate: { name: string; isDefault: boolean } | null;
+}
+
+/** الصيغ المدعومة رسمياً — أي صيغة أخرى تُهمل لتجنب تفسير تواريخ عشوائي */
+export const SUPPORTED_DATE_FORMATS = [
+  'YYYY-MM-DD',
+  'DD/MM/YYYY',
+  'MM/DD/YYYY',
+  'DD-MM-YYYY',
+  'DD.MM.YYYY',
+  'YYYY/MM/DD',
+] as const;
+
+/** صيغة التاريخ المختارة أولاً ثم بقية الصيغ كاحتياط آمن */
+function buildDateFormats(preferred?: string | null): string[] {
+  const fallback = ['YYYY-MM-DD', 'DD/MM/YYYY', 'DD-MM-YYYY', 'YYYY/MM/DD'];
+  const chosen = preferred?.trim();
+  if (!chosen || !(SUPPORTED_DATE_FORMATS as readonly string[]).includes(chosen)) return fallback;
+  return [chosen, ...fallback.filter((format) => format !== chosen)];
 }
 
 /** قالب احتياطي أخير إن فشل التعرّف التلقائي — لا يُستخدم إلا لرسالة خطأ واضحة */
@@ -157,14 +179,24 @@ export class StatementService {
   }
 
   /** فحص الملف: التعرّف على الأعمدة واقتراح التعيين — لا يكتب شيئاً */
-  async inspect(file: { buffer: Buffer; originalname: string }) {
+  async inspect(file: { buffer: Buffer; originalname: string }, sheetName?: string | null) {
     const { sheets } = readStatementWorkbook(file.buffer, file.originalname);
     if (!sheets.length) throw ERR.VALIDATION([{ field: 'file', messageAr: 'الملف فارغ — لا أوراق فيه' }]);
-    const { sheet, ambiguousSheets } = pickStatementSheet(sheets);
+    const picked = pickStatementSheet(sheets);
+    let sheet = picked.sheet;
+    const requested = sheetName?.trim();
+    if (requested) {
+      const found = sheets.find((item) => item.name === requested)
+        ?? sheets.find((item) => item.name.trim().toLowerCase() === requested.toLowerCase());
+      if (!found) {
+        throw ERR.VALIDATION([{ field: 'sheetName', messageAr: `الورقة «${requested}» غير موجودة — المتاح: ${sheets.map((item) => item.name).join('، ')}` }]);
+      }
+      sheet = found;
+    }
     const detection = detectColumnMapping(sheet.rows);
     const warnings = [...detection.warnings];
-    if (ambiguousSheets.length > 1) {
-      warnings.unshift(`الملف يحوي معاملات في أكثر من ورقة (${ambiguousSheets.join('، ')}) — سيُقرأ «${sheet.name}»؛ صدّر الورقة المطلوبة وحدها عند الحاجة`);
+    if (!requested && picked.ambiguousSheets.length > 1) {
+      warnings.unshift(`الملف يحوي معاملات في أكثر من ورقة (${picked.ambiguousSheets.join('، ')}) — سيُقرأ «${sheet.name}»؛ اختر ورقة أخرى من القائمة عند الحاجة`);
     }
     return {
       sheetName: sheet.name,
@@ -188,6 +220,7 @@ export class StatementService {
     if (!account.isActive) throw ERR.VALIDATION([{ field: 'accountId', messageAr: 'حساب المورد معطل — فعّله أولاً' }]);
 
     let template: ResolvedTemplate;
+    let selectedSheet: string | null = input.sheetName?.trim() || null;
     if (input.mapping) {
       // تعيين يدوي/مؤكد من الواجهة — قد يُحفظ كقالب لإعادة الاستخدام
       const mapping = normalizeMapping(input.mapping);
@@ -195,7 +228,7 @@ export class StatementService {
         id: null,
         headerRows: input.headerRows ?? 1,
         columnsMapping: mapping,
-        dateFormats: DEFAULT_DATE_FORMATS,
+        dateFormats: buildDateFormats(input.dateFormat),
         decimalSep: input.decimalSep ?? '.',
         thousandSep: input.thousandSep ?? ',',
       };
@@ -218,21 +251,22 @@ export class StatementService {
       template = await this.resolveTemplate(input.accountId, input.side, input.templateId);
     } else {
       // «تلقائي»: تعرّف على الأعمدة من ترويسة الملف نفسها — لا قالب ثابت
-      const detection = await this.inspect(file);
+      const detection = await this.inspect(file, input.sheetName);
       const mapping = usableMapping(detection);
+      selectedSheet = detection.sheetName;
       template = mapping
         ? {
             id: null,
             headerRows: detection.headerRows,
             columnsMapping: mapping,
-            dateFormats: DEFAULT_DATE_FORMATS,
+            dateFormats: detection.dateFormats,
             decimalSep: detection.decimalSep,
             thousandSep: detection.thousandSep,
           }
         : AUTO_TEMPLATE;
     }
 
-    const parsed = parseStatementFile(file.buffer, file.originalname, template, input.side);
+    const parsed = parseStatementFile(file.buffer, file.originalname, template, input.side, selectedSheet);
 
     // حفظ الملف فوراً — الاعتماد يسجل source_file (الإلغاء يترك ملفاً يتيمًا مقبول)
     const { storedName, storedPath, sha256 } = await this.saveSourceFile(file);
@@ -264,9 +298,13 @@ export class StatementService {
       closingHint: parsed.closingHint,
       templateId: template.id,
       lineCount: parsed.lines.length,
+      ignoredRows: parsed.ignoredRows,
       sheetName: parsed.sheetName,
+      sheetNames: parsed.sheetNames,
       decimalSep: template.decimalSep,
       thousandSep: template.thousandSep,
+      dateFormats: template.dateFormats,
+      dateFormat: template.dateFormats[0] ?? 'DD/MM/YYYY',
       mapping: template.columnsMapping,
     };
   }

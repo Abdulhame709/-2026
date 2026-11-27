@@ -29,10 +29,36 @@ export interface ColumnDetection {
   mapping: Partial<Record<FieldKey, string>>;
   decimalSep: '.' | ',';
   thousandSep: ',' | '.';
+  /** ترتيب صيغ التاريخ المقترح لهذا الملف (الأرجح أولاً) — يمرَّر للتحليل والاعتماد */
+  dateFormats: string[];
   warnings: string[];
 }
 
-const DATE_FORMATS = ['YYYY-MM-DD', 'DD/MM/YYYY', 'DD-MM-YYYY', 'YYYY/MM/DD'];
+const DATE_FORMATS = [
+  'YYYY-MM-DD', 'DD/MM/YYYY', 'DD-MM-YYYY', 'YYYY/MM/DD', 'DD.MM.YYYY',
+  'MM/DD/YYYY', 'DD/MM/YY', 'DD-MM-YY', 'YYYYMMDD',
+];
+
+/** ترتيب اليوم/الشهر من قيم عمود التاريخ: 13/04 ⇒ يوم أول، 04/13 ⇒ شهر أول */
+function suggestDateFormat(values: string[]): string | null {
+  let dayFirst = 0;
+  let monthFirst = 0;
+  let yearFirst = 0;
+  for (const raw of values) {
+    const text = String(raw ?? '').trim();
+    if (!text) continue;
+    if (/^\d{8}$/.test(text)) { yearFirst += 2; continue; }
+    const parts = text.split(/[/\-.]/).map((part) => part.trim());
+    if (parts.length !== 3 || parts.some((part) => !/^\d{1,4}$/.test(part))) continue;
+    if (parts[0].length === 4) { yearFirst += 1; continue; }
+    if (Number(parts[0]) > 12) dayFirst += 1;
+    else if (Number(parts[1]) > 12) monthFirst += 1;
+  }
+  if (yearFirst > dayFirst && yearFirst > monthFirst) return 'YYYY-MM-DD';
+  if (dayFirst > monthFirst) return 'DD/MM/YYYY';
+  if (monthFirst > dayFirst) return 'MM/DD/YYYY';
+  return null;
+}
 
 /** توحيد نص الترويسة: تشكيل/تطويل/علامات اتجاه + أ/إ/آ→ا، ى→ي، ة→ه */
 export function normalizeHeader(value: unknown): string {
@@ -48,15 +74,15 @@ export function normalizeHeader(value: unknown): string {
 
 /** مرادفات الترويسات — تُطبَّع عند التحميل */
 const SYNONYMS: Array<{ field: FieldKey; words: string[] }> = [
-  { field: 'date', words: ['تاريخ', 'التاريخ', 'تاريخ العمليه', 'تاريخ القيد', 'تاريخ الفاتوره', 'date', 'value date', 'posting date', 'transaction date', 'day'] },
+  { field: 'date', words: ['تاريخ', 'التاريخ', 'تاريخ العمليه', 'تاريخ القيد', 'تاريخ الفاتوره', 'تاريخ المستند', 'تاريخ السند', 'date', 'value date', 'posting date', 'transaction date', 'day'] },
   { field: 'docType', words: ['نوع المستند', 'نوع العمليه', 'نوع الحركه', 'نوع الحركة', 'نوع', 'type', 'document type', 'doc type', 'transaction type'] },
-  { field: 'docNo', words: ['رقم المستند', 'رقم الفاتوره', 'رقم القيد', 'رقم السند', 'رقم العمليه', 'رقم الاشعار', 'doc no', 'document no', 'document number', 'invoice no', 'invoice number', 'voucher no', 'entry no', 'no', 'number'] },
-  { field: 'description', words: ['البيان', 'بيان', 'الوصف', 'وصف', 'التفاصيل', 'تفاصيل', 'الشرح', 'شرح', 'الملاحظات', 'ملاحظات', 'description', 'details', 'narration', 'particulars', 'memo', 'notes'] },
+  { field: 'docNo', words: ['رقم المستند', 'رقم الفاتوره', 'رقم القيد', 'رقم السند', 'رقم العمليه', 'رقم الحركة', 'رقم الاشعار', 'الرقم', 'رقم', 'doc no', 'document no', 'document number', 'invoice no', 'invoice number', 'voucher no', 'entry no', 'no', 'number', 'id'] },
+  { field: 'description', words: ['البيان', 'بيان', 'الوصف', 'وصف', 'التفاصيل', 'تفاصيل', 'الشرح', 'شرح', 'الملاحظات', 'ملاحظات', 'التوصيف', 'توصيف', 'description', 'details', 'narration', 'particulars', 'memo', 'notes'] },
   { field: 'ref', words: ['المرجع', 'مرجع', 'المرجع الخارجي', 'مرجع خارجي', 'reference', 'ref', 'external ref', 'external reference'] },
-  { field: 'debit', words: ['مدين', 'المدين', 'مدينه', 'debit', 'dr'] },
-  { field: 'credit', words: ['دائن', 'الدائن', 'دائنه', 'credit', 'cr'] },
-  { field: 'amount', words: ['المبلغ', 'مبلغ', 'القيمه', 'قيمه', 'صافي', 'الصافي', 'amount', 'value', 'net amount', 'net'] },
-  { field: 'balance', words: ['الرصيد', 'رصيد', 'balance', 'running balance'] },
+  { field: 'debit', words: ['مدين', 'المدين', 'مدينه', 'عليه', 'debit', 'dr'] },
+  { field: 'credit', words: ['دائن', 'الدائن', 'دائنه', 'له', 'credit', 'cr'] },
+  { field: 'amount', words: ['المبلغ', 'مبلغ', 'القيمه', 'قيمه', 'صافي', 'الصافي', 'الحركه', 'حركه', 'مدين/دائن', 'مدين / دائن', 'مدين ودائن', 'debit/credit', 'debit / credit', 'amount', 'value', 'net amount', 'net'] },
+  { field: 'balance', words: ['الرصيد', 'رصيد', 'الرصيد التراكمي', 'الرصيد بعد الحركة', 'balance', 'running balance'] },
   { field: 'currency', words: ['العملة', 'عمله', 'currency', 'ccy', 'curr'] },
 ];
 
@@ -133,13 +159,36 @@ function parseAmountEither(raw: string, decimalSep: string, thousandSep: string)
   return parseAmount(raw, decimalSep, thousandSep) ?? parseAmount(raw, '.', ',') ?? parseAmount(raw, ',', '.');
 }
 
+const SUMMARY_ROW = /^(?:ال)?(?:رصيد|اجمالي|إجمالي|مجموع|نهائي|ختامي|total|balance|closing|opening)(?=$|[\s:\-–—])/i;
+
+/** صف رصيد/إجمالي بلا تاريخ — يُستبعد من إحصاءات المحتوى كي لا يُختار عمود الرصيد كمبلغ */
+function isSummaryRow(row: unknown[]): boolean {
+  if (row.some((cell) => parseDate(cell, DATE_FORMATS) !== null)) return false;
+  return row.some((cell) => SUMMARY_ROW.test(CELL(cell)));
+}
+
+/** صف ترويسة إضافي (ترويسة على صفين/خلايا مدمجة): نصوص معروفة بلا تواريخ ولا مبالغ */
+function isHeaderContinuation(row: unknown[]): boolean {
+  let known = 0;
+  let nonEmpty = 0;
+  for (const cell of row) {
+    const text = CELL(cell);
+    if (!text) continue;
+    nonEmpty += 1;
+    if (parseDate(text, DATE_FORMATS) !== null) return false;
+    if (parseAmountEither(text, '.', ',')) return false;
+    if (matchHeader(normalizeHeader(text))) known += 1;
+  }
+  return nonEmpty > 0 && known > 0;
+}
+
 /** فحص المحتوى يكمل الترويسات الناقصة أو الغامضة */
 function detectFromContent(
   columns: DetectedColumn[],
   dataRows: unknown[][],
   mapping: Partial<Record<FieldKey, string>>,
 ): void {
-  const rows = dataRows.slice(0, 12).filter((row) => row.some((cell) => CELL(cell) !== ''));
+  const rows = dataRows.slice(0, 12).filter((row) => row.some((cell) => CELL(cell) !== '') && !isSummaryRow(row));
   if (!rows.length) return;
   const stats = columns.map((column) => {
     let dates = 0;
@@ -191,9 +240,24 @@ function detectFromContent(
 export function detectColumnMapping(rows: unknown[][]): ColumnDetection {
   const header = findHeaderRow(rows);
   const headerRowIndex = header.fields >= 2 ? header.index : -1;
-  const headerRows = headerRowIndex >= 0 ? headerRowIndex + 1 : 0;
-  const headerRow = headerRowIndex >= 0 ? (rows[headerRowIndex] ?? []) : [];
+  let headerRows = headerRowIndex >= 0 ? headerRowIndex + 1 : 0;
+  // ترويسة على أكثر من صف: صف فرعي مثل «مدين | دائن» تحت «المبلغ» — يُضاف للترويسة
+  if (headerRowIndex >= 0) {
+    while (headerRows < rows.length && headerRows <= headerRowIndex + 3 && isHeaderContinuation(rows[headerRows])) {
+      headerRows += 1;
+    }
+  }
   const dataStart = headerRows;
+
+  // نص الترويسة لكل عمود: آخر صف ترويسة غير فارغ (الصف الفرعي أدق من الأصل)
+  const headerTextAt = (index: number): string => {
+    if (headerRowIndex < 0) return '';
+    for (let rowIndex = headerRows - 1; rowIndex >= headerRowIndex; rowIndex -= 1) {
+      const text = CELL(rows[rowIndex]?.[index]);
+      if (text) return text;
+    }
+    return '';
+  };
 
   let width = 0;
   for (const row of rows.slice(headerRows, headerRows + 8)) width = Math.max(width, row.length);
@@ -201,7 +265,7 @@ export function detectColumnMapping(rows: unknown[][]): ColumnDetection {
 
   const columns: DetectedColumn[] = [];
   for (let index = 0; index < width; index += 1) {
-    const headerText = CELL(headerRow[index]);
+    const headerText = headerTextAt(index);
     const sample: string[] = [];
     for (const row of rows.slice(dataStart, dataStart + 10)) {
       const value = CELL(row[index]);
@@ -233,6 +297,15 @@ export function detectColumnMapping(rows: unknown[][]): ColumnDetection {
     .flatMap((column) => column.sample);
   const { decimalSep, thousandSep } = detectSeparators(numericSamples);
 
+  const dateColumn = columns.find((column) => column.field === 'date');
+  const dateSamples = dateColumn
+    ? rows.slice(dataStart, dataStart + 60).map((row) => CELL(row[dateColumn.index])).filter(Boolean)
+    : [];
+  const suggestedFormat = suggestDateFormat(dateSamples);
+  const dateFormats = suggestedFormat
+    ? [suggestedFormat, ...DATE_FORMATS.filter((format) => format !== suggestedFormat)]
+    : [...DATE_FORMATS];
+
   const warnings: string[] = [];
   if (header.fields < 2) {
     warnings.push('لم يُعثر على صف ترويسة واضح — عيّن الأعمدة يدوياً من القائمة المنسدلة');
@@ -251,7 +324,7 @@ export function detectColumnMapping(rows: unknown[][]): ColumnDetection {
     warnings.push('عند وجود عمود مبلغ واحد: القيمة الموجبة دائن في «كشفنا» ومدين في «كشف المورد»، والسالب عكس ذلك — راجع الاتجاه في المعاينة');
   }
 
-  return { headerRowIndex, headerRows, columns, mapping, decimalSep, thousandSep, warnings };
+  return { headerRowIndex, headerRows, columns, mapping, decimalSep, thousandSep, dateFormats, warnings };
 }
 
 /** اختيار ورقة المعاملات من مصنف متعدد الأوراق (أعلى عدد صفوف فيها تواريخ) */

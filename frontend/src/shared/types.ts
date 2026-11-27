@@ -103,6 +103,8 @@ export interface ParsedStatement {
   templateId?: number | null;
   decimalSep?: string;
   thousandSep?: string;
+  /** صيغ التاريخ المستخدمة في التحليل (الأرجح أولاً) — يشاركها محقق الواجهة مع الخادم */
+  dateFormats?: string[];
 }
 
 /** معلومات كشف معتمد نهائياً عبر الخادم (Module 3) */

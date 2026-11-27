@@ -33,6 +33,16 @@ interface StatementUploadStepProps {
 
 const SIDE_LABELS: Record<StatementSide, string> = { ours: 'كشفنا (نظامنا المحاسبي)', theirs: 'كشف المورد' };
 
+/** صيغ التاريخ المعروضة — الخادم يجرّب المختارة أولاً ثم بقية الصيغ كاحتياط */
+const DATE_FORMAT_OPTIONS = [
+  { value: 'DD/MM/YYYY', label: 'يوم/شهر/سنة (31/12/2026)' },
+  { value: 'MM/DD/YYYY', label: 'شهر/يوم/سنة (12/31/2026)' },
+  { value: 'YYYY-MM-DD', label: 'سنة-شهر-يوم (2026-12-31)' },
+  { value: 'DD-MM-YYYY', label: 'يوم-شهر-سنة (31-12-2026)' },
+  { value: 'DD.MM.YYYY', label: 'يوم.شهر.سنة (31.12.2026)' },
+  { value: 'YYYY/MM/DD', label: 'سنة/شهر/يوم (2026/12/31)' },
+];
+
 interface ServerTemplate {
   id: number;
   name: string;
@@ -81,6 +91,9 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
   const [inspection, setInspection] = useState<InspectResult | null>(null);
   const [columnFields, setColumnFields] = useState<Record<string, MappingField | ''>>({});
   const [headerRows, setHeaderRows] = useState(1);
+  /** الصيغة المفضلة لتفسير التواريخ + الورقة المختارة من المصنف */
+  const [dateFormat, setDateFormat] = useState('DD/MM/YYYY');
+  const [sheetName, setSheetName] = useState<string | null>(null);
   const [saveAsTemplate, setSaveAsTemplate] = useState(false);
   const [templateName, setTemplateName] = useState('تقارير المطابقة التجريبية');
   const [templateIsDefault, setTemplateIsDefault] = useState(false);
@@ -115,11 +128,11 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
   const errorsByLine = useMemo(() => {
     const map = new Map<number, ReturnType<typeof validateLine>>();
     lines.forEach((l) => {
-      const errs = validateLine(l, decimalSep, thousandSep);
+      const errs = validateLine(l, decimalSep, thousandSep, parsed?.dateFormats);
       if (errs.length > 0) map.set(l.lineNo, errs);
     });
     return map;
-  }, [lines, decimalSep, thousandSep]);
+  }, [lines, decimalSep, thousandSep, parsed?.dateFormats]);
 
   const totalErrors = errorsByLine.size;
   const totals = parsed
@@ -176,6 +189,27 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
       });
   };
 
+  /** فحص الأعمدة (مع إمكانية تغيير الورقة) — يُستدعى عند اختيار الملف وعند تبديل الورقة */
+  const runInspection = (file: File, requestedSheet?: string | null) => {
+    if (!accountId) return;
+    setParsing(true);
+    inspectStatementFile(accountId, side, file, requestedSheet ?? null)
+      .then((result) => {
+        setInspection(result);
+        setHeaderRows(result.headerRows);
+        setColumnFields(toColumnFields(result));
+        setSheetName(result.sheetName);
+        setDateFormat(result.dateFormats?.[0] ?? 'DD/MM/YYYY');
+        setParsing(false);
+      })
+      .catch((e: { messageAr?: string; message?: string }) => {
+        setParsing(false);
+        setFileMeta(null);
+        setPendingFile(null);
+        message.error(e?.messageAr ?? e?.message ?? 'فشل فحص أعمدة الملف');
+      });
+  };
+
   const handleFile = (file: File) => {
     if (!accountId) {
       message.error('اختر المورد والعملة في الخطوة السابقة أولاً');
@@ -196,19 +230,7 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
       return;
     }
     setPendingFile(file);
-    inspectStatementFile(accountId, side, file)
-      .then((result) => {
-        setInspection(result);
-        setHeaderRows(result.headerRows);
-        setColumnFields(toColumnFields(result));
-        setParsing(false);
-      })
-      .catch((e: { messageAr?: string; message?: string }) => {
-        setParsing(false);
-        setFileMeta(null);
-        setPendingFile(null);
-        message.error(e?.messageAr ?? e?.message ?? 'فشل فحص أعمدة الملف');
-      });
+    runInspection(file);
   };
 
   /** الرفع الفعلي للمعاينة بعد تأكيد التعيين (أو مباشرة مع قالب محفوظ) */
@@ -226,9 +248,10 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
         const mapped = p.lines.map(toPreviewLine);
         setPreviewToken(p.token);
         setLines(mapped);
-        setParsed({ opening: p.opening, lines: mapped, announcedClosing: null, announcedCount: null, templateId: p.templateId, decimalSep: p.decimalSep, thousandSep: p.thousandSep });
+        setParsed({ opening: p.opening, lines: mapped, announcedClosing: null, announcedCount: null, templateId: p.templateId, decimalSep: p.decimalSep, thousandSep: p.thousandSep, dateFormats: p.dateFormats });
         setParsing(false);
-        message.success(`حُلّلت ورقة «${p.sheetName}»: ${p.lineCount} بنداً — راجع المعاينة قبل الاعتماد`);
+        const ignoredNote = p.ignoredRows > 0 ? ` — تُخطّي ${p.ignoredRows} صف ترويسة/رصيد/إجمالي` : '';
+        message.success(`حُلّلت ورقة «${p.sheetName}»: ${p.lineCount} بنداً${ignoredNote} — راجع المعاينة قبل الاعتماد`);
         if (options.saveTemplate) {
           message.success(`حُفظ القالب «${options.saveTemplate.name}» — سيظهر في القائمة`);
           listAccountTemplates(accountId)
@@ -273,6 +296,8 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
       headerRows,
       decimalSep: inspection.decimalSep,
       thousandSep: inspection.thousandSep,
+      dateFormat,
+      sheetName: sheetName ?? inspection.sheetName,
       saveTemplate:
         saveAsTemplate && templateName.trim()
           ? { name: templateName.trim(), isDefault: templateIsDefault }
@@ -290,6 +315,8 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
     setPendingFile(null);
     setColumnFields({});
     setHeaderRows(1);
+    setDateFormat('DD/MM/YYYY');
+    setSheetName(null);
     setOcrDraft(false);
     setOcrReviewed(false);
     setAnnouncedClosing(null);
@@ -590,6 +617,30 @@ export function StatementUploadStep({ side, accountId, sessionId, completed, onC
           />
 
           <Space wrap className="mapping-controls">
+            {inspection.sheetNames.length > 1 && (
+              <>
+                <span>ورقة الملف</span>
+                <Select
+                  size="small"
+                  style={{ minWidth: 180 }}
+                  value={sheetName ?? inspection.sheetName}
+                  onChange={(value) => {
+                    if (pendingFile) runInspection(pendingFile, value);
+                  }}
+                  options={inspection.sheetNames.map((name) => ({ value: name, label: name }))}
+                  aria-label="ورقة الملف المراد قراءتها"
+                />
+              </>
+            )}
+            <span>صيغة التاريخ</span>
+            <Select
+              size="small"
+              style={{ minWidth: 230 }}
+              value={dateFormat}
+              onChange={setDateFormat}
+              options={DATE_FORMAT_OPTIONS}
+              aria-label="صيغة تاريخ البنود"
+            />
             <span>عدد صفوف الترويسة</span>
             <InputNumber
               size="small"

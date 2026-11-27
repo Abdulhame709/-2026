@@ -263,3 +263,115 @@ test('commit reads the analysis separators stored with the preview, not template
     await rm(uploadDir, { recursive: true, force: true });
   }
 });
+
+test('amounts accept accounting negatives, currencies and separator mismatch', () => {
+  assert.equal(parseAmount('(1,234.50)', '.', ','), -1234.5);
+  assert.equal(parseAmount('1,234.50-', '.', ','), -1234.5);
+  assert.equal(parseAmount('−1.234,50 ر.ي', '.', ','), -1234.5); // قالب خاطئ → استنتاج الفواصل
+  assert.equal(parseAmount('SAR 2,000', '.', ','), 2000);
+  assert.equal(parseAmount('١٬٢٣٤٫٥٠ ﷼', '.', ','), 1234.5);
+  assert.equal(parseAmount('1234,56', '.', ','), 1234.56);
+  assert.equal(parseAmount('1.234,56', '.', ','), 1234.56);
+  assert.equal(parseAmount('غير محدد', '.', ','), null);
+});
+
+test('dates accept times, Excel serials, compact YYYYMMDD and named months', () => {
+  assert.equal(parseDate('2026-01-31 10:20', ['YYYY-MM-DD']), '2026-01-31');
+  assert.equal(parseDate('31/01/2026 10:20:05 م', ['DD/MM/YYYY']), '2026-01-31');
+  assert.equal(parseDate('2026-01-31T10:20:00Z', ['YYYY-MM-DD']), '2026-01-31');
+  assert.equal(parseDate(46023, ['YYYY-MM-DD']), '2026-01-01'); // تسلسلي Excel
+  assert.equal(parseDate(20260131, ['YYYY-MM-DD']), '2026-01-31');
+  assert.equal(parseDate('20260131', ['YYYY-MM-DD']), '2026-01-31');
+  assert.equal(parseDate('31 يناير 2026', ['DD/MM/YYYY']), '2026-01-31');
+  assert.equal(parseDate('Jan 31, 2026', ['YYYY-MM-DD']), '2026-01-31');
+  assert.equal(parseDate('04/05/2026', ['MM/DD/YYYY']), '2026-04-05');
+  assert.equal(parseDate('04/05/2026', ['DD/MM/YYYY']), '2026-05-04');
+  assert.equal(parseDate('31/02/2026 09:00', ['DD/MM/YYYY']), null);
+});
+
+/** ترميز Windows-1256 لأسطر الاختبار (Node لا يملك مُرمِّزاً عكسياً له) */
+const WIN1256 = { ا: 0xc7, ل: 0xe1, ت: 0xca, ر: 0xd1, ي: 0xed, خ: 0xce, ب: 0xc8, ن: 0xe4, م: 0xe3, د: 0xcf, ف: 0xdd, و: 0xe6, ة: 0xc9, ئ: 0xc6, ص: 0xd5, ح: 0xcd, ج: 0xcc, إ: 0xc5 };
+const encodeWin1256 = (text) => Buffer.from([...text].map((char) => (
+  char.charCodeAt(0) < 128 ? char.charCodeAt(0) : (WIN1256[char] ?? 0x3f)
+)));
+
+test('CSV reads Windows-1256 exports, sep= headers and semicolon delimiters', () => {
+  const template = {
+    headerRows: 1,
+    columnsMapping: { date: 'A', description: 'B', debit: 'C', credit: 'D' },
+    dateFormats: ['YYYY-MM-DD'], decimalSep: '.', thousandSep: ',',
+  };
+  const win = encodeWin1256('التاريخ,البيان,مدين,دائن\n2026-01-31,فاتورة,100,\n');
+  const parsedWin = parseStatementFile(win, 'excel-arabic.csv', template);
+  assert.equal(parsedWin.lines.length, 1);
+  assert.equal(parsedWin.lines[0].description, 'فاتورة');
+  assert.equal(parsedWin.lines[0].debitRaw, '100');
+
+  const semicolon = Buffer.from(
+    'sep=;\n' + 'التاريخ;البيان;مدين;دائن\n' + '2026-01-31;فاتورة;100;\n',
+    'utf8',
+  );
+  const parsedSemi = parseStatementFile(semicolon, 'semicolon.csv', template);
+  assert.equal(parsedSemi.lines.length, 1);
+  assert.equal(parsedSemi.lines[0].description, 'فاتورة');
+  assert.equal(parsedSemi.lines[0].debitRaw, '100');
+});
+
+test('repeated headers, totals and opening/closing balances never become transactions', () => {
+  const template = {
+    headerRows: 1,
+    columnsMapping: { date: 'A', description: 'B', debit: 'C', credit: 'D' },
+    dateFormats: ['YYYY-MM-DD'], decimalSep: '.', thousandSep: ',',
+  };
+  const csv = Buffer.from([
+    'التاريخ,البيان,مدين,دائن',
+    'رصيد افتتاحي,,,500',
+    '2026-01-01,فاتورة,1000,',
+    'التاريخ,البيان,مدين,دائن',
+    '2026-01-02,سداد,,200',
+    'الإجمالي,,1000,700',
+    'رصيد ختامي,,,800',
+  ].join('\n'));
+  const parsed = parseStatementFile(csv, 'summary.csv', template);
+  assert.equal(parsed.lines.length, 2);
+  assert.deepEqual(parsed.lines.map((line) => line.description), ['فاتورة', 'سداد']);
+  assert.equal(parsed.opening, 500);
+  assert.equal(parsed.closingHint, 800); // الختامي الصريح يتفوق على صف الإجمالي
+  assert.equal(parsed.ignoredRows, 4);
+});
+
+test('two-row headers and combined debit/credit columns map without manual edits', () => {
+  const rows = [
+    ['التاريخ', 'البيان', '', ''],
+    ['', '', 'مدين', 'دائن'],
+    ['2026-01-01', 'فاتورة', '1000', ''],
+    ['2026-01-02', 'سداد', '', '500'],
+  ];
+  const detection = detectColumnMapping(rows);
+  assert.equal(detection.headerRows, 2);
+  assert.deepEqual(detection.mapping, { date: 'A', description: 'B', debit: 'C', credit: 'D' });
+  assert.equal(detection.dateFormats[0], 'YYYY-MM-DD');
+
+  const combined = detectColumnMapping([
+    ['التاريخ', 'البيان', 'مدين/دائن'],
+    ['2026-01-01', 'فاتورة', '1500'],
+  ]);
+  assert.deepEqual(combined.mapping, { date: 'A', description: 'B', amount: 'C' });
+});
+
+test('inspection and parsing can target an explicit worksheet', async () => {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([['Cover'], ['Report title']]), 'Cover');
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([['التاريخ', 'البيان', 'مدين'], ['2026-01-01', 'فاتورة', '100']]),
+    'Ledger',
+  );
+  const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+  const service = new StatementService({ getById: async () => ({ currencyCode: 'YER', isActive: true }) }, {}, {}, {}, {});
+  const auto = await service.inspect({ buffer, originalname: 'book.xlsx' });
+  assert.equal(auto.sheetName, 'Ledger');
+  const cover = await service.inspect({ buffer, originalname: 'book.xlsx' }, 'Cover');
+  assert.equal(cover.sheetName, 'Cover');
+  assert.deepEqual(cover.sheetNames, ['Cover', 'Ledger']);
+});
