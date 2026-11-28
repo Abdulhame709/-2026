@@ -24,11 +24,14 @@ async function main(): Promise<void> {
     throw new Error('الاستخدام: npm run db:create-admin -- --apply');
   }
 
+  const connectionString = process.env.DATABASE_URL?.trim();
   const host = process.env.PGHOST;
-  const database = process.env.PGDATABASE;
+  const database = connectionString
+    ? decodeURIComponent(new URL(connectionString).pathname.replace(/^\//, ''))
+    : process.env.PGDATABASE;
   const username = process.env.ADMIN_USERNAME?.trim();
-  if (!host || !database || !process.env.PGUSER || !process.env.PGPASSWORD || !username) {
-    throw new Error('عيّن PGHOST وPGDATABASE وPGUSER وPGPASSWORD وADMIN_USERNAME صراحة');
+  if (!database || !username || (!connectionString && (!host || !process.env.PGUSER || !process.env.PGPASSWORD))) {
+    throw new Error('عيّن DATABASE_URL أو (PGHOST وPGDATABASE وPGUSER وPGPASSWORD) مع ADMIN_USERNAME صراحة');
   }
   if (!USERNAME_RE.test(username)) throw new Error('اسم المستخدم غير صالح (3–30 حرفاً: حروف/أرقام/نقطة/شرطة/سفلية)');
   if (process.env.ADMIN_CONFIRM !== `${database}/${username}`) {
@@ -40,11 +43,15 @@ async function main(): Promise<void> {
   const fullName = process.env.ADMIN_FULL_NAME?.trim() || 'مدير النظام';
 
   const pool = new pg.Pool({
-    host,
-    database,
-    user: process.env.PGUSER,
-    password: process.env.PGPASSWORD,
-    port: Number(process.env.PGPORT ?? 5432),
+    ...(connectionString
+      ? { connectionString, ssl: { rejectUnauthorized: false } }
+      : {
+          host,
+          database,
+          user: process.env.PGUSER,
+          password: process.env.PGPASSWORD,
+          port: Number(process.env.PGPORT ?? 5432),
+        }),
     max: 1,
   });
 

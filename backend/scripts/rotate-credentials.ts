@@ -8,11 +8,14 @@ async function main(): Promise<void> {
     throw new Error('الاستخدام: npm run db:rotate -- --check أو npm run db:rotate -- --apply');
   }
 
+  const connectionString = process.env.DATABASE_URL?.trim();
   const host = process.env.PGHOST;
-  const database = process.env.PGDATABASE;
+  const database = connectionString
+    ? decodeURIComponent(new URL(connectionString).pathname.replace(/^\//, ''))
+    : process.env.PGDATABASE;
   const username = process.env.ROTATE_USERNAME?.trim();
-  if (!host || !database || !process.env.PGUSER || !process.env.PGPASSWORD || !username) {
-    throw new Error('عيّن PGHOST وPGDATABASE وPGUSER وPGPASSWORD وROTATE_USERNAME صراحة');
+  if (!database || !username || (!connectionString && (!host || !process.env.PGUSER || !process.env.PGPASSWORD))) {
+    throw new Error('عيّن DATABASE_URL أو (PGHOST وPGDATABASE وPGUSER وPGPASSWORD) مع ROTATE_USERNAME صراحة');
   }
   if (!/^[a-z0-9._-]{3,30}$/i.test(username)) throw new Error('اسم المستخدم المستهدف غير صالح');
 
@@ -26,11 +29,15 @@ async function main(): Promise<void> {
   }
 
   const pool = new pg.Pool({
-    host,
-    database,
-    user: process.env.PGUSER,
-    password: process.env.PGPASSWORD,
-    port: Number(process.env.PGPORT ?? 5432),
+    ...(connectionString
+      ? { connectionString, ssl: { rejectUnauthorized: false } }
+      : {
+          host,
+          database,
+          user: process.env.PGUSER,
+          password: process.env.PGPASSWORD,
+          port: Number(process.env.PGPORT ?? 5432),
+        }),
     max: 1,
   });
   try {
