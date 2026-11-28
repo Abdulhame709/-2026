@@ -248,8 +248,11 @@ export class MatchingService {
       }
     };
 
-    greedySplit(our.filter((l) => l.signed < -EPS), their.filter((l) => l.signed > EPS), 'our');
-    greedySplit(their.filter((l) => l.signed < -EPS), our.filter((l) => l.signed > EPS), 'their');
+    // التوزيع الجشع جزء من قاعدة amount_date؛ لا يعمل إن عطّلها المالك في ترتيب القواعد.
+    if (ruleOrder.includes('amount_date')) {
+      greedySplit(our.filter((l) => l.signed < -EPS), their.filter((l) => l.signed > EPS), 'our');
+      greedySplit(their.filter((l) => l.signed < -EPS), our.filter((l) => l.signed > EPS), 'their');
+    }
 
     const balanced = proposed.filter((group) =>
       Math.abs(
@@ -311,6 +314,10 @@ export class MatchingService {
     const ourIds = new Set(our.map((l) => l.id));
     let sumOurs = 0;
     let sumTheirs = 0;
+    // حصص البند الواحد قد تُذكر في أكثر من عنصر (مثلاً تعديل جزئي مكرر)؛
+    // نجمعها أولاً ثم نقارن بالمتاح مرة واحدة — وإلا مرّت حصص مجموعها يتجاوز البند.
+    const requested = new Map<number, number>();
+    const linesById = new Map<number, StatementLineFull>();
     for (const item of items) {
       const line = all.get(item.lineId);
       if (!line) throw ERR.VALIDATION([{ field: 'items', messageAr: `البند #${item.lineId} لا ينتمي لكشفي هذه الجلسة` }]);
@@ -319,13 +326,18 @@ export class MatchingService {
       if (Math.sign(portion) !== Math.sign(line.signed)) {
         throw ERR.VALIDATION([{ field: 'items', messageAr: `حصة البند #${item.lineId} يجب أن بنفس اتجاه مبلغه` }]);
       }
-      const othersUsed = consumed.get(item.lineId) ?? 0;
-      const available = Math.abs(line.signed) - (othersUsed - (own?.get(item.lineId) ?? 0));
-      if (Math.abs(portion) > available + EPS) {
-        throw ERR.VALIDATION([{ field: 'items', messageAr: `حصة البند #${item.lineId} (${Math.abs(portion).toLocaleString('en-US')}) تتجاوز المتاح (${Math.max(0, available).toLocaleString('en-US')})` }]);
-      }
+      linesById.set(line.id, line);
+      requested.set(item.lineId, (requested.get(item.lineId) ?? 0) + Math.abs(portion));
       if (ourIds.has(item.lineId)) sumOurs += Math.abs(portion);
       else sumTheirs += Math.abs(portion);
+    }
+    for (const [lineId, total] of requested) {
+      const line = linesById.get(lineId)!;
+      const othersUsed = consumed.get(lineId) ?? 0;
+      const available = Math.abs(line.signed) - (othersUsed - (own?.get(lineId) ?? 0));
+      if (total > available + EPS) {
+        throw ERR.VALIDATION([{ field: 'items', messageAr: `حصة البند #${lineId} (${total.toLocaleString('en-US')}) تتجاوز المتاح (${Math.max(0, available).toLocaleString('en-US')})` }]);
+      }
     }
     // التوازن: ما نحصل عليه من جهة يساوي ما يُحاسب من الأخرى (بالمطلق) — Q11
     if (Math.abs(sumOurs - sumTheirs) > EPS) {

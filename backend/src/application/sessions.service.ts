@@ -27,7 +27,9 @@ export interface SessionProgress {
   matchRatePct: number;
 }
 
-const EPS = 0.005;
+// نفس دقة التخزين في محرّك المطابقة (أربع منازل). EPS أكبر (نصف سنت) كان يخفي
+// بقايا صغيرة عن ملخص الإغلاق وعن صفوف الفروق، فيُغلق الكشف وفيه فرق غير موثق.
+const EPS = 0.00005;
 
 /** ملخص فروق الإغلاق: كل بند متبقٍ = عندهم فقط / عندنا فقط (M5 يفصّل الأسباب) */
 export interface CloseDiscrepancy {
@@ -134,14 +136,12 @@ export class SessionService {
         throw ERR.VALIDATION([{ field: 'carriedFromSessionId', messageAr: 'لا بنود موثقة في الجلسة السابقة — لا شيء يُرحَّل (أدخل الافتتاحي يدوياً)' }]);
       }
       carriedFrom = src.id;
-      const EPS = 0.005;
-      // تعديل = قيمة مرسلة تخالف الختامي المحسوب، أو تفريغ حقل كان سيُرحَّل بقيمة غير صفر
-      const oursEdited =
-        openingOurs == null ? Math.abs(closings.closingOurs) > EPS : Math.abs(openingOurs - closings.closingOurs) > EPS;
-      const theirsEdited =
-        openingTheirs == null
-          ? Math.abs(closings.closingTheirs) > EPS
-          : Math.abs(openingTheirs - closings.closingTheirs) > EPS;
+      // الترحيل الآلي: القيمة الفارغة تعني «خذ الختامي المحسوب»، لا «اتركه فارغاً».
+      if (openingOurs == null) openingOurs = closings.closingOurs;
+      if (openingTheirs == null) openingTheirs = closings.closingTheirs;
+      // تعديل = قيمة مرسلة تخالف الختامي المحسوب (بعد ملء الفارغ آلياً)
+      const oursEdited = Math.abs(openingOurs - closings.closingOurs) > EPS;
+      const theirsEdited = Math.abs(openingTheirs - closings.closingTheirs) > EPS;
       if (oursEdited || theirsEdited) {
         const reason = (input.openingAdjustReason ?? '').trim();
         if (reason.length < 5) {
