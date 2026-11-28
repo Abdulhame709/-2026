@@ -8,7 +8,7 @@ import PDFDocument from 'pdfkit';
 import * as XLSX from 'xlsx';
 import { OcrService, normalizeConfidence, parseOcrLines } from '../dist/application/ocr.service.js';
 import { StatementService } from '../dist/application/statement.service.js';
-import { parseAmount, parseDate, parseStatementFile, parseStatementRows } from '../dist/infrastructure/parsing/statementParser.js';
+import { parseAmount, parseDate, parseStatementFile, parseStatementRows, readStatementWorkbook } from '../dist/infrastructure/parsing/statementParser.js';
 import { detectColumnMapping } from '../dist/infrastructure/parsing/columnMapping.js';
 import { normalizePdfText, reconstructPdfTable } from '../dist/infrastructure/parsing/pdfTable.js';
 
@@ -496,4 +496,68 @@ test('explicit debit/credit columns win over amount and balance columns', () => 
   }, 'theirs');
   assert.equal(parsed.lines.length, 1);
   assert.deepEqual([parsed.lines[0].debitRaw, parsed.lines[0].creditRaw], ['6,640.00', '0']);
+});
+
+// ===== تحصين Excel/CSV (الوحدة 3) =====
+
+test('CSV accepts CR-only endings, pipe delimiters and a literal sep=\\t directive', () => {
+  const crOnly = Buffer.from('التاريخ,البيان,مدين\r2026-01-01,فاتورة,100\r2026-01-02,سداد,50');
+  const cr = readStatementWorkbook(crOnly, 'cr.csv');
+  assert.deepEqual(cr.sheets[0].rows[1], ['2026-01-01', 'فاتورة', '100']);
+  assert.equal(cr.sheets[0].rows.length, 3);
+
+  const pipes = Buffer.from('التاريخ|البيان|مدين|دائن\n2026-01-01|فاتورة|100|\n');
+  const pipe = readStatementWorkbook(pipes, 'pipe.csv');
+  assert.deepEqual(pipe.sheets[0].rows[0], ['التاريخ', 'البيان', 'مدين', 'دائن']);
+  assert.deepEqual(pipe.sheets[0].rows[1], ['2026-01-01', 'فاتورة', '100', '']);
+
+  const tabs = Buffer.from('sep=\\t\nالتاريخ\tالبيان\tمدين\n2026-01-01\tفاتورة\t100\n');
+  const tab = readStatementWorkbook(tabs, 'tab.csv');
+  assert.deepEqual(tab.sheets[0].rows[1], ['2026-01-01', 'فاتورة', '100']);
+});
+
+test('CSV detects UTF-16 without a BOM instead of mangling Arabic', () => {
+  const text = 'التاريخ,البيان,مدين\n2026-01-01,فاتورة,100\n';
+  const buffer = Buffer.from(text, 'utf16le');
+  assert.notEqual(buffer.subarray(0, 2).toString('hex'), 'fffe'); // بلا BOM
+  const { sheets } = readStatementWorkbook(buffer, 'utf16.csv');
+  assert.deepEqual(sheets[0].rows[0], ['التاريخ', 'البيان', 'مدين']);
+  assert.deepEqual(sheets[0].rows[1], ['2026-01-01', 'فاتورة', '100']);
+});
+
+test('an oversized formatted worksheet range is rejected before building huge arrays', () => {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([['التاريخ', 'البيان', 'مدين'], ['2026-01-01', 'فاتورة', '100']]);
+  sheet['!ref'] = 'A1:C200001';
+  sheet.C200001 = { t: 'n', v: 1 };
+  XLSX.utils.book_append_sheet(workbook, sheet, 'Big');
+  const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+  assert.throws(() => readStatementWorkbook(buffer, 'big.xlsx'), (error) =>
+    error.code === 'VALIDATION_FAILED' && error.details.some((detail) => detail.messageAr.includes('أكبر من الحد')));
+});
+
+test('auto sheet selection ignores hidden template sheets', () => {
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+    ['التاريخ', 'البيان', 'مدين'],
+    ['2026-01-01', 'فاتورة', '100'],
+  ]), 'Ledger');
+  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([
+    ['التاريخ', 'البيان', 'مدين'],
+    ['2026-01-02', 'قالب', '50'],
+  ]), 'Template');
+  workbook.Workbook = { Sheets: [{ Hidden: 0 }, { Hidden: 1 }] };
+  const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'buffer' });
+  const template = {
+    headerRows: 1,
+    columnsMapping: { date: 'A', description: 'B', debit: 'C' },
+    dateFormats: ['YYYY-MM-DD'],
+    decimalSep: '.',
+    thousandSep: ',',
+  };
+  const parsed = parseStatementFile(buffer, 'hidden.xlsx', template, 'theirs');
+  assert.equal(parsed.sheetName, 'Ledger');
+  assert.deepEqual(parsed.sheetNames, ['Ledger', 'Template']);
+  assert.equal(parsed.lines.length, 1);
+  assert.equal(parsed.lines[0].debitRaw, '100');
 });

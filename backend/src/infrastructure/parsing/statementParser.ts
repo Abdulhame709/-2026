@@ -63,7 +63,14 @@ export interface ParseResult {
 export interface WorkbookSheet {
   name: string;
   rows: unknown[][];
+  /** ورقة مخفية في المصنف (قالب/مراجع) — لا تُختار تلقائياً ما دامت هناك ورقة ظاهرة */
+  hidden?: boolean;
 }
+
+/** سقوف أمان: نطاق منسّق وهمي بمليون صف أو أعمدة زائدة يرفع الذاكرة بلا فائدة */
+const MAX_SHEET_ROWS = 200_000;
+const MAX_SHEET_COLUMNS = 1_000;
+const CSV_DELIMITERS = ['\t', ';', ',', '|'] as const;
 
 /** حرف عمود Excel (A=0…) → رقم */
 export function columnIndex(letter: string): number | null {
@@ -326,9 +333,27 @@ export function readStatementWorkbook(buffer: Buffer, filename: string): { ext: 
   if (ext === 'csv' && buffer.length && !isXlsx && !isXls) {
     const utf16le = buffer.subarray(0, 2).equals(Buffer.from([0xff, 0xfe]));
     const utf16be = buffer.subarray(0, 2).equals(Buffer.from([0xfe, 0xff]));
+    let encodings: string[];
+    if (utf16le) encodings = ['utf-16le'];
+    else if (utf16be) encodings = ['utf-16be'];
+    else {
+      // UTF-16 بلا BOM (بعض أدوات التصدير): الحروف اللاتينية/العربية يتبعها بايت صفري
+      // في LE، أو يسبقها في BE. نكشفها من توزّع الأصفار قبل تجربة UTF-8/1256.
+      const head = buffer.subarray(0, Math.min(buffer.length, 512));
+      let evenZeros = 0;
+      let oddZeros = 0;
+      for (let index = 0; index + 1 < head.length; index += 2) {
+        if (head[index] === 0) evenZeros += 1;
+        if (head[index + 1] === 0) oddZeros += 1;
+      }
+      const pairs = Math.floor(head.length / 2);
+      const bomlessUtf16 = pairs >= 8 && (evenZeros > pairs * 0.3 || oddZeros > pairs * 0.3);
+      encodings = bomlessUtf16
+        ? [oddZeros >= evenZeros ? 'utf-16le' : 'utf-16be']
+        : ['utf-8', 'windows-1256'];
+    }
     // تصديرات Excel العربية على Windows كثيراً ما تكون CSV بترميز Windows-1256،
     // لا UTF-8. نحاول UTF-8/UTF-16 أولاً ثم 1256 قبل رفض الملف.
-    const encodings = utf16le ? ['utf-16le'] : utf16be ? ['utf-16be'] : ['utf-8', 'windows-1256'];
     for (const encoding of encodings) {
       try {
         const content = new TextDecoder(encoding, { fatal: true }).decode(buffer);
@@ -345,13 +370,13 @@ export function readStatementWorkbook(buffer: Buffer, filename: string): { ext: 
     throw ERR.VALIDATION([{ field: 'file', messageAr: 'امتداد الملف لا يطابق محتواه أو ترميز CSV غير مدعوم — أعد تصديره UTF-8 أو CSV من Excel' }]);
   }
 
-  /** أول سطر غير فارغ: يحدد `sep=;` أو الفاصل الغالب (بعض أدوات Excel تصدّر ; أو Tab) */
+  /** أول سطر غير فارغ: يحدد `sep=;` أو الفاصل الغالب (بعض أدوات Excel تصدّر ; أو Tab أو |) */
   const detectCsvFormat = (content: string): { content: string; FS?: string } => {
-    const lines = content.split(/\r?\n/);
+    const lines = content.split(/\r\n|\r|\n/);
     let firstIndex = 0;
     while (firstIndex < lines.length && !lines[firstIndex].trim()) firstIndex += 1;
     const firstLine = lines[firstIndex] ?? '';
-    const sep = /^sep=(.)\s*$/i.exec(firstLine.trim());
+    const sep = /^sep=(\\t|.)\s*$/i.exec(firstLine.trim());
     if (sep) {
       const delimiter = sep[1] === '\\t' ? '\t' : sep[1];
       return { content: lines.slice(firstIndex + 1).join('\n'), FS: delimiter };
@@ -368,9 +393,9 @@ export function readStatementWorkbook(buffer: Buffer, filename: string): { ext: 
       return count;
     };
     const sampleLines = lines.slice(firstIndex, firstIndex + 5).filter((line) => line.trim());
-    const totals = new Map<string, number>([['\t', 0], [';', 0], [',', 0]]);
+    const totals = new Map<string, number>(CSV_DELIMITERS.map((delimiter) => [delimiter, 0]));
     for (const line of sampleLines) {
-      for (const delimiter of totals.keys()) {
+      for (const delimiter of CSV_DELIMITERS) {
         totals.set(delimiter, (totals.get(delimiter) ?? 0) + countOutsideQuotes(line, delimiter));
       }
     }
@@ -378,19 +403,43 @@ export function readStatementWorkbook(buffer: Buffer, filename: string): { ext: 
     return best[1] > 0 ? { content, FS: best[0] } : { content };
   };
 
+  /** نطاق الورقة قد يكون منسّقاً بالكامل إلى مليون صف — نرفض قبل بناء مصفوفة ضخمة */
+  const assertSheetSize = (name: string, sheet: XLSX.WorkSheet): void => {
+    const ref = sheet['!ref'];
+    if (!ref) return;
+    const range = XLSX.utils.decode_range(ref);
+    const rows = range.e.r - range.s.r + 1;
+    const columns = range.e.c - range.s.c + 1;
+    if (rows > MAX_SHEET_ROWS || columns > MAX_SHEET_COLUMNS) {
+      throw ERR.VALIDATION([{
+        field: 'file',
+        messageAr: `الورقة «${name}» أكبر من الحد الآمن (${MAX_SHEET_ROWS} صفاً × ${MAX_SHEET_COLUMNS} عموداً) — احذف الصفوف/الأعمدة الفارغة المنسّقة وأعد التصدير`,
+      }]);
+    }
+  };
+
   try {
     let workbook: XLSX.WorkBook;
     if (ext === 'csv') {
       const csv = detectCsvFormat(csvContent!);
       // raw: true — لا يُحوّل CSV النص إلى أرقام/تواريخ، فنحفظ النص الخام (فواصل/أرقام عربية) للتحليل والتصحيح
-      workbook = XLSX.read(csv.content, { type: 'string', cellDates: true, raw: true, FS: csv.FS });
+      workbook = XLSX.read(csv.content, { type: 'string', cellDates: true, raw: true, FS: csv.FS, sheetRows: MAX_SHEET_ROWS + 1 });
     } else {
-      workbook = XLSX.read(buffer, { cellDates: true });
+      workbook = XLSX.read(buffer, { cellDates: true, sheetRows: MAX_SHEET_ROWS + 1 });
     }
-    const sheets = workbook.SheetNames.map((name) => ({
-      name,
-      rows: XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[name], { header: 1, blankrows: false, defval: '' }),
-    }));
+    const sheetMeta = (workbook.Workbook as { Sheets?: Array<{ Hidden?: number }> } | undefined)?.Sheets;
+    const sheets: WorkbookSheet[] = workbook.SheetNames.map((name, index) => {
+      const sheet = workbook.Sheets[name];
+      assertSheetSize(name, sheet);
+      return {
+        name,
+        hidden: (sheetMeta?.[index]?.Hidden ?? 0) !== 0,
+        rows: XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, blankrows: false, defval: '' }),
+      };
+    });
+    if (!sheets.length) {
+      throw ERR.VALIDATION([{ field: 'file', messageAr: 'المصنف لا يحتوي أي ورقة — أعد تصديره من Excel' }]);
+    }
     return { ext, sheets };
   } catch (error) {
     if (error instanceof AppError) throw error;
@@ -597,13 +646,17 @@ export function parseStatementFile(
       throw ERR.VALIDATION([{ field: 'sheetName', messageAr: `الورقة «${requested}» غير موجودة — المتاح: ${sheets.map((sheet) => sheet.name).join('، ')}` }]);
     }
   } else {
-    const candidates = sheets.filter((sheet) => sheet.rows.slice(template.headerRows).some((row) =>
+    // الورقة المخفية غالباً قالب/مراجع؛ لا تسبب «معاملات في عدة أوراق» ما دامت
+    // هناك ورقة ظاهرة. إن كانت كل الأوراق مخفية نعود إليها كلها.
+    const visible = sheets.filter((sheet) => !sheet.hidden);
+    const autoSheets = visible.length ? visible : sheets;
+    const candidates = autoSheets.filter((sheet) => sheet.rows.slice(template.headerRows).some((row) =>
       parseDate(row[col.date!], template.dateFormats) !== null &&
       numericColumns.some((index) => parseAmount(CELL(row[index]), template.decimalSep, template.thousandSep) !== null)));
     if (candidates.length > 1) {
       throw ERR.VALIDATION([{ field: 'file', messageAr: `توجد معاملات في عدة أوراق (${candidates.map((sheet) => sheet.name).join('، ')}) — اختر الورقة المطلوبة من لوحة التعيين حتى لا تُهمل بنوداً` }]);
     }
-    selected = candidates[0] ?? sheets[0];
+    selected = candidates[0] ?? autoSheets[0] ?? sheets[0];
   }
   const rows = selected?.rows ?? [];
   const selectedName = selected?.name ?? '';
