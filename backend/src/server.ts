@@ -46,7 +46,19 @@ import { TemplatesRepository } from './infrastructure/repositories/templates.rep
  */
 
 const app = express();
-app.set('trust proxy', process.env.TRUST_PROXY === 'loopback' ? 'loopback' : false);
+// خلف وكيل HTTPS (Render/Caddy/Netlify) نحتاج قراءة X-Forwarded-Proto/IP،
+// وإلا صار req.protocol = http ورفض فحص المصدر كل طلب كتابة. القيم:
+// false (محلي) | loopback | true | عدد قفزات موثوقة.
+const trustProxyEnv = process.env.TRUST_PROXY?.trim().toLowerCase();
+const trustProxy: boolean | number | 'loopback' =
+  trustProxyEnv === 'true'
+    ? true
+    : trustProxyEnv === 'loopback'
+      ? 'loopback'
+      : trustProxyEnv && Number.isInteger(Number(trustProxyEnv))
+        ? Number(trustProxyEnv)
+        : false;
+app.set('trust proxy', trustProxy);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '10mb' }));
 
@@ -106,12 +118,23 @@ app.use(sessionMiddleware(authService));
 
 const api = express.Router();
 
+// أصول إضافية موثوقة (الواجهة على Netlify تُمرّر /api إلى هذا الخادم، فيصل
+// Origin باسم نطاق Netlify بينما Host هو نطاق الخادم). تُضبط صراحةً لا تلقائياً.
+const extraOrigins = new Set(
+  (process.env.PUBLIC_ORIGINS ?? '')
+    .split(',')
+    .map((value) => value.trim().replace(/\/$/, ''))
+    .filter(Boolean),
+);
+
 api.use((req, res, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const origin = req.get('origin');
   const host = req.get('host');
   const fetchSite = req.get('sec-fetch-site');
-  if ((origin && origin !== `${req.protocol}://${host}`) || (!origin && (req.headers.cookie || (fetchSite && fetchSite !== 'same-origin')))) {
+  const sameOrigin = origin === `${req.protocol}://${host}`;
+  if ((origin && !sameOrigin && !extraOrigins.has(origin.replace(/\/$/, '')))
+    || (!origin && (req.headers.cookie || (fetchSite && fetchSite !== 'same-origin')))) {
     res.status(403).json({ error: { code: 'INVALID_ORIGIN', messageAr: 'مصدر الطلب غير مسموح' } });
     return;
   }

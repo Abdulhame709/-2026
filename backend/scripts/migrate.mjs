@@ -12,11 +12,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, '..', 'src', 'infrastructure', 'db', 'migrations');
 const DB_NAME = process.env.PGDATABASE ?? 'reconciliation';
 
+// DATABASE_URL يتقدّم (Neon/السحابة) — وإلا الإعدادات المفردة كالسابق.
+const connectionString = process.env.DATABASE_URL?.trim();
+const useSsl = Boolean(connectionString) || process.env.PGSSL === 'require';
 const pool = new pg.Pool({
-  host: process.env.PGHOST ?? '127.0.0.1',
-  port: Number(process.env.PGPORT ?? 5432),
-  user: process.env.PGUSER ?? 'postgres',
-  database: DB_NAME,
+  ...(connectionString
+    ? { connectionString }
+    : {
+        host: process.env.PGHOST ?? '127.0.0.1',
+        port: Number(process.env.PGPORT ?? 5432),
+        user: process.env.PGUSER ?? 'postgres',
+        database: DB_NAME,
+      }),
+  ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
 });
 
 async function main() {
