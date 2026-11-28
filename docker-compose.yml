@@ -1,0 +1,77 @@
+# تشغيل كامل بخطوة واحدة: انسخ .env.example إلى .env واملأ الأسرار ثم:
+#   docker compose up -d --build
+# الواجهة و/API على http://localhost:3000 — ضع أمامه وكيل HTTPS (Caddy/Nginx) في الإنتاج.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-reconciliation}
+      POSTGRES_USER: ${PGUSER:-mushabaka_app}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?ضع PGPASSWORD في ملف .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-mushabaka_app} -d ${PGDATABASE:-reconciliation}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # لا تُفتح 5432 للخارج؛ الاتصال داخلي عبر شبكة compose فقط.
+    expose:
+      - "5432"
+
+  migrate:
+    build: .
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${PGUSER:-mushabaka_app}
+      PGPASSWORD: ${PGPASSWORD:?ضع PGPASSWORD في ملف .env}
+      PGDATABASE: ${PGDATABASE:-reconciliation}
+    command: ["node", "scripts/migrate.mjs"]
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOST: 0.0.0.0
+      SERVE_FRONTEND: "1"
+      FRONTEND_DIST: /app/frontend/dist
+      TRUST_PROXY: loopback
+      COOKIE_SAMESITE: strict
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${PGUSER:-mushabaka_app}
+      PGPASSWORD: ${PGPASSWORD:?ضع PGPASSWORD في ملف .env}
+      PGDATABASE: ${PGDATABASE:-reconciliation}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?ضع مفتاح النسخ (64 حرفاً ست عشرياً) في ملف .env}
+      # خدمة migrate أدناه تولّت الهجرات قبل بدء الخادم.
+      RUN_MIGRATIONS: "0"
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      # الرفع والنسخ وبيانات OCR يجب أن تبقى بعد إعادة إنشاء الحاوية.
+      - app-storage:/app/backend/storage
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+volumes:
+  db-data:
+  app-storage:

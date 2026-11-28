@@ -1,0 +1,7 @@
+# ملفات تُنفَّذ على Linux يجب أن تبقى LF ولو كان المستودع يُستنسخ على Windows.
+* text=auto
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf

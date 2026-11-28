@@ -1,0 +1,13 @@
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+backend/storage/
+backend/.pgdata/
+backend/logs/
+.env
+.env.*
+!.env.example
+*.dpapi
+*.local
+opencode.json

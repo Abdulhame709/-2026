@@ -1,0 +1,54 @@
+# نشر بنقرة على Render: اربط المستودع ثم «New > Blueprint» واختر هذا الملف.
+# ملاحظة: القرص الدائم (disk) متاح في خطة Starter فأعلى؛ الخطة المجانية تفقد
+# ملفات الرفع والنسخ عند كل إعادة نشر، فلا تُستخدم لبيانات مالية حقيقية.
+services:
+  - type: web
+    name: mushabaka
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: SERVE_FRONTEND
+        value: "1"
+      - key: FRONTEND_DIST
+        value: /app/frontend/dist
+      - key: TRUST_PROXY
+        value: loopback
+      - key: COOKIE_SAMESITE
+        value: strict
+      - key: PGHOST
+        fromDatabase:
+          name: mushabaka-db
+          property: host
+      - key: PGPORT
+        fromDatabase:
+          name: mushabaka-db
+          property: port
+      - key: PGUSER
+        fromDatabase:
+          name: mushabaka-db
+          property: user
+      - key: PGPASSWORD
+        fromDatabase:
+          name: mushabaka-db
+          property: password
+      - key: PGDATABASE
+        fromDatabase:
+          name: mushabaka-db
+          property: database
+      - key: BACKUP_ENCRYPTION_KEY
+        sync: false # يُدخل في لوحة Render مرة واحدة (64 حرفاً ست عشرياً)
+    disk:
+      name: mushabaka-storage
+      mountPath: /app/backend/storage
+      sizeGB: 10
+
+databases:
+  - name: mushabaka-db
+    plan: basic-256mb
+    postgresMajorVersion: "16"
