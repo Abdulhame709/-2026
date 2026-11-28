@@ -8,8 +8,9 @@ import PDFDocument from 'pdfkit';
 import * as XLSX from 'xlsx';
 import { OcrService, normalizeConfidence, parseOcrLines } from '../dist/application/ocr.service.js';
 import { StatementService } from '../dist/application/statement.service.js';
-import { parseAmount, parseDate, parseStatementFile } from '../dist/infrastructure/parsing/statementParser.js';
+import { parseAmount, parseDate, parseStatementFile, parseStatementRows } from '../dist/infrastructure/parsing/statementParser.js';
 import { detectColumnMapping } from '../dist/infrastructure/parsing/columnMapping.js';
+import { normalizePdfText, reconstructPdfTable } from '../dist/infrastructure/parsing/pdfTable.js';
 
 test('Excel and CSV accept Arabic numerals but reject impossible calendar dates', () => {
   assert.equal(parseAmount('١٬٢٣٤٫٥٠', '.', ','), 1234.5);
@@ -374,4 +375,125 @@ test('inspection and parsing can target an explicit worksheet', async () => {
   const cover = await service.inspect({ buffer, originalname: 'book.xlsx' }, 'Cover');
   assert.equal(cover.sheetName, 'Cover');
   assert.deepEqual(cover.sheetNames, ['Cover', 'Ledger']);
+});
+
+// ===== إعادة بناء جداول PDF من الإحداثيات (pdfTable) =====
+
+/** مقطع نصي كما يعطيه pdfjs: transform[4]=x، transform[5]=y */
+const pdfWord = (text, x, y, width) => ({ str: text, transform: [1, 0, 0, 1, x, y], width, height: 10 });
+
+test('PDF grid rebuilds RTL columns, aligns right edges and drops the footer block', () => {
+  const items = [
+    pdfWord('الرصيد', 40, 700, 34),
+    pdfWord('دائن', 112, 700, 30),
+    pdfWord('مدين', 178, 700, 34),
+    pdfWord('البيان', 250, 700, 30),
+    pdfWord('المرجع', 360, 700, 30),
+    pdfWord('رقم المستند', 420, 700, 50),
+    pdfWord('نوع المستند', 480, 700, 50),
+    pdfWord('التاريخ', 545, 700, 34),
+    // حركة أولى
+    pdfWord('10,000.00', 30, 680, 50),
+    pdfWord('0', 126, 680, 8),
+    pdfWord('10,000.00', 180, 680, 50),
+    pdfWord('فاتورة مبيعات', 240, 680, 75),
+    pdfWord('R-1', 365, 680, 20),
+    pdfWord('1', 432, 680, 8),
+    pdfWord('فاتورة', 482, 680, 34),
+    pdfWord('2024-01-01', 530, 680, 50),
+    // حركة ثانية
+    pdfWord('12,000.00', 30, 660, 50),
+    pdfWord('2,000.00', 110, 660, 46),
+    pdfWord('0', 190, 660, 8),
+    pdfWord('سداد نقدي', 250, 660, 50),
+    pdfWord('2', 432, 660, 8),
+    pdfWord('سند قبض', 470, 660, 45),
+    pdfWord('2024-01-05', 530, 660, 50),
+    // تذييل بلا تاريخ — يُقطع
+    pdfWord('رصيد حالي:', 280, 640, 60),
+    pdfWord('8,000.00', 120, 640, 50),
+  ];
+  const table = reconstructPdfTable(items);
+  assert.ok(table);
+  assert.equal(table.layout.headerRows, 1);
+  assert.deepEqual(table.rows[0], ['الرصيد', 'دائن', 'مدين', 'البيان', 'المرجع', 'رقم المستند', 'نوع المستند', 'التاريخ']);
+  assert.equal(table.rows.length, 3); // ترويسة + حركتان، بلا تذييل
+  assert.deepEqual(table.rows[1], ['10,000.00', '0', '10,000.00', 'فاتورة مبيعات', 'R-1', '1', 'فاتورة', '2024-01-01']);
+  assert.equal(table.rows[2][1], '2,000.00');
+  assert.equal(table.rows[2][3], 'سداد نقدي');
+  assert.equal(table.rows[2][6], 'سند قبض');
+  assert.equal(table.rows[2][7], '2024-01-05');
+  assert.ok(!table.rows.flat().some((cell) => String(cell).includes('رصيد حالي')));
+
+  const detection = detectColumnMapping(table.rows);
+  assert.deepEqual(detection.mapping, {
+    date: 'H', description: 'D', debit: 'C', credit: 'B', balance: 'A', ref: 'E', docNo: 'F', docType: 'G',
+  });
+});
+
+test('PDF grid merges a date split across two visual lines and removes the leftover row', () => {
+  const items = [
+    pdfWord('التاريخ', 500, 700, 34),
+    pdfWord('البيان', 300, 700, 30),
+    pdfWord('مدين', 200, 700, 30),
+    pdfWord('دائن', 120, 700, 30),
+    pdfWord('2025-01-', 490, 680, 40),
+    pdfWord('حركة', 300, 680, 30),
+    pdfWord('5.00', 200, 680, 25),
+    pdfWord('0', 120, 680, 8),
+    pdfWord('01', 490, 664, 10),
+  ];
+  const table = reconstructPdfTable(items);
+  assert.ok(table);
+  assert.equal(table.rows.length, 2);
+  assert.equal(table.rows[1][3], '2025-01-01');
+  assert.equal(table.rows[1][2], 'حركة');
+  assert.equal(table.rows[1][1], '5.00');
+});
+
+test('PDF grid drops the parent "amount" anchor when debit/credit sub-headers exist', () => {
+  const items = [
+    pdfWord('الرصيد', 90, 700, 34),
+    pdfWord('التاريخ', 200, 700, 34),
+    pdfWord('البيان', 300, 700, 30),
+    pdfWord('المبلغ', 450, 700, 40),
+    pdfWord('دائن', 420, 690, 30),
+    pdfWord('مدين', 480, 690, 30),
+    pdfWord('100', 95, 675, 20),
+    pdfWord('2024-01-01', 190, 675, 50),
+    pdfWord('شراء', 300, 675, 30),
+    pdfWord('100', 415, 675, 22),
+    pdfWord('0', 488, 675, 8),
+  ];
+  const table = reconstructPdfTable(items);
+  assert.ok(table);
+  assert.equal(table.layout.headerRows, 2);
+  assert.ok(!table.layout.anchors.some((anchor) => anchor.header === 'المبلغ'));
+  const detection = detectColumnMapping(table.rows);
+  assert.deepEqual(detection.mapping, { balance: 'A', date: 'B', description: 'C', credit: 'D', debit: 'E' });
+  assert.equal(table.rows[2][3], '100');
+  assert.equal(table.rows[2][4], '0');
+});
+
+test('PDF text normalization folds presentation forms, Arabic digits, bidi marks and tatweel', () => {
+  assert.equal(normalizePdfText('ﺍﻟﺘﺎﺭﻳﺦ'), 'التاريخ');
+  assert.equal(normalizePdfText('١٢٣٫٤٥'), '123.45');
+  assert.equal(normalizePdfText('الـبيان\u200f'), 'البيان');
+  assert.equal(normalizePdfText('  مبلغ   1,000  '), 'مبلغ 1,000');
+});
+
+test('explicit debit/credit columns win over amount and balance columns', () => {
+  const rows = [
+    ['التاريخ', 'البيان', 'قيمة البضاعة', 'مدين', 'دائن', 'الرصيد'],
+    ['2025-04-15', 'فاتورة', '999', '6,640.00', '0', '184,615.00'],
+  ];
+  const parsed = parseStatementRows(rows, {
+    headerRows: 1,
+    columnsMapping: { date: 'A', description: 'B', amount: 'C', debit: 'D', credit: 'E', balance: 'F' },
+    dateFormats: ['YYYY-MM-DD'],
+    decimalSep: '.',
+    thousandSep: ',',
+  }, 'theirs');
+  assert.equal(parsed.lines.length, 1);
+  assert.deepEqual([parsed.lines[0].debitRaw, parsed.lines[0].creditRaw], ['6,640.00', '0']);
 });

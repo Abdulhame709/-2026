@@ -181,7 +181,7 @@ export function statementsRoutes(svc: StatementService, matchingSvc: MatchingSer
     ocrInProgress = true;
     try {
       const draft = ext === 'pdf'
-        ? await ocrSvc.extractPdf(file.buffer)
+        ? await ocrSvc.extractPdf(file.buffer, fields.side)
         : await ocrSvc.extractImage(file.buffer, ext === 'png' ? 'png' : 'jpeg');
       const token = await svc.uploadOcr(req.user!.id, file, fields, draft);
       res.status(201).json({ draft, token });

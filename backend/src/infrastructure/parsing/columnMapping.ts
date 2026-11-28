@@ -40,7 +40,7 @@ const DATE_FORMATS = [
 ];
 
 /** ترتيب اليوم/الشهر من قيم عمود التاريخ: 13/04 ⇒ يوم أول، 04/13 ⇒ شهر أول */
-function suggestDateFormat(values: string[]): string | null {
+export function suggestDateFormat(values: string[]): string | null {
   let dayFirst = 0;
   let monthFirst = 0;
   let yearFirst = 0;
@@ -76,7 +76,7 @@ export function normalizeHeader(value: unknown): string {
 const SYNONYMS: Array<{ field: FieldKey; words: string[] }> = [
   { field: 'date', words: ['تاريخ', 'التاريخ', 'تاريخ العمليه', 'تاريخ القيد', 'تاريخ الفاتوره', 'تاريخ المستند', 'تاريخ السند', 'date', 'value date', 'posting date', 'transaction date', 'day'] },
   { field: 'docType', words: ['نوع المستند', 'نوع العمليه', 'نوع الحركه', 'نوع الحركة', 'نوع', 'type', 'document type', 'doc type', 'transaction type'] },
-  { field: 'docNo', words: ['رقم المستند', 'رقم الفاتوره', 'رقم القيد', 'رقم السند', 'رقم العمليه', 'رقم الحركة', 'رقم الاشعار', 'الرقم', 'رقم', 'doc no', 'document no', 'document number', 'invoice no', 'invoice number', 'voucher no', 'entry no', 'no', 'number', 'id'] },
+  { field: 'docNo', words: ['رقم المستند', 'رقم الفاتوره', 'رقم القيد', 'رقم السند', 'رقم العمليه', 'رقم الحركة', 'رقم الاشعار', 'الرقم', 'رقم', 'مستند', 'doc no', 'document no', 'document number', 'invoice no', 'invoice number', 'voucher no', 'entry no', 'no', 'number', 'id'] },
   { field: 'description', words: ['البيان', 'بيان', 'الوصف', 'وصف', 'التفاصيل', 'تفاصيل', 'الشرح', 'شرح', 'الملاحظات', 'ملاحظات', 'التوصيف', 'توصيف', 'description', 'details', 'narration', 'particulars', 'memo', 'notes'] },
   { field: 'ref', words: ['المرجع', 'مرجع', 'المرجع الخارجي', 'مرجع خارجي', 'reference', 'ref', 'external ref', 'external reference'] },
   { field: 'debit', words: ['مدين', 'المدين', 'مدينه', 'عليه', 'debit', 'dr'] },
@@ -105,7 +105,7 @@ const FIELD_PRIORITY: FieldKey[] = [
 ];
 
 /** أفضل مطابقة ترويسة لعمود واحد — null لو لا مطابقة */
-function matchHeader(header: string): { field: FieldKey; score: number } | null {
+export function matchHeader(header: string): { field: FieldKey; score: number } | null {
   if (!header) return null;
   const padded = ` ${header} `;
   let best: { field: FieldKey; score: number } | null = null;
@@ -150,9 +150,10 @@ function detectSeparators(samples: string[]): { decimalSep: '.' | ','; thousandS
     if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(value)) dotThousands += 1;
     else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(value)) commaThousands += 1;
   }
-  return commaThousands > dotThousands
-    ? { decimalSep: ',', thousandSep: '.' }
-    : { decimalSep: '.', thousandSep: ',' };
+  // الأكثر ظهوراً هو فاصل الآلاف: «122,250» ⇒ الفاصلة آلاف والنقطة عشرية، والعكس صحيح
+  if (commaThousands > dotThousands) return { decimalSep: '.', thousandSep: ',' };
+  if (dotThousands > commaThousands) return { decimalSep: ',', thousandSep: '.' };
+  return { decimalSep: '.', thousandSep: ',' };
 }
 
 function parseAmountEither(raw: string, decimalSep: string, thousandSep: string): number | null {
@@ -160,6 +161,8 @@ function parseAmountEither(raw: string, decimalSep: string, thousandSep: string)
 }
 
 const SUMMARY_ROW = /^(?:ال)?(?:رصيد|اجمالي|إجمالي|مجموع|نهائي|ختامي|total|balance|closing|opening)(?=$|[\s:\-–—])/i;
+/** صفوف الأرصدة/التدوير/المجاميع — ليست ترويسة مهما طابقت كلماتها مرادفات */
+const OPENING_CLOSING_ROW = /(افتتاحي|فتتاحي|ختامي|نهائي|تدوير|سابق|مدور|opening|closing|beginning|ending|b\/f|c\/f)/i;
 
 /** صف رصيد/إجمالي بلا تاريخ — يُستبعد من إحصاءات المحتوى كي لا يُختار عمود الرصيد كمبلغ */
 function isSummaryRow(row: unknown[]): boolean {
@@ -167,7 +170,9 @@ function isSummaryRow(row: unknown[]): boolean {
   return row.some((cell) => SUMMARY_ROW.test(CELL(cell)));
 }
 
-/** صف ترويسة إضافي (ترويسة على صفين/خلايا مدمجة): نصوص معروفة بلا تواريخ ولا مبالغ */
+/** صف ترويسة إضافي (ترويسة على صفين/خلايا مدمجة): نصوص معروفة بلا تواريخ ولا مبالغ.
+ *  صفوف الأرصدة/المجاميع («الرصيد الافتتاحي»، «المجموع النهائي») ليست ترويسة أبداً
+ *  ولو طابقت كلماتها مرادفات الأعمدة — تُترك للتحليل كي لا يُفقد الرصيد الافتتاحي. */
 function isHeaderContinuation(row: unknown[]): boolean {
   let known = 0;
   let nonEmpty = 0;
@@ -177,6 +182,7 @@ function isHeaderContinuation(row: unknown[]): boolean {
     nonEmpty += 1;
     if (parseDate(text, DATE_FORMATS) !== null) return false;
     if (parseAmountEither(text, '.', ',')) return false;
+    if (SUMMARY_ROW.test(text) || OPENING_CLOSING_ROW.test(text)) return false;
     if (matchHeader(normalizeHeader(text))) known += 1;
   }
   return nonEmpty > 0 && known > 0;
