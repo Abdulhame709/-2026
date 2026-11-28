@@ -1,4 +1,6 @@
 import express from 'express';
+import fs from 'node:fs';
+import path from 'node:path';
 import { pool } from './infrastructure/db/pool.js';
 import { UsersRepository } from './infrastructure/repositories/users.repository.js';
 import {
@@ -144,6 +146,32 @@ api.use('/settings', settingsRoutes(settingsRepo, auditRepo));
 api.use('/backups', backupsRoutes(backupService));
 
 app.use('/api/v1', api);
+
+// خدمة الواجهة المبنية من نفس الأصل (نشر بخدمة واحدة: حاوية أو VPS).
+// تُفعَّل تلقائياً عند وجود frontend/dist، أو صراحةً بـSERVE_FRONTEND=1،
+// حتى لا تغطي مسار 404 في التطوير المحلي حيث الواجهة على Vite.
+const frontendDist = process.env.FRONTEND_DIST?.trim()
+  || path.resolve(process.cwd(), '..', 'frontend', 'dist');
+const serveFrontend = process.env.SERVE_FRONTEND === '1'
+  || fs.existsSync(path.join(frontendDist, 'index.html'));
+if (serveFrontend) {
+  app.use(express.static(frontendDist, {
+    index: false,
+    setHeaders: (res, filePath) => {
+      const name = path.basename(filePath);
+      if (name === 'index.html' || name === 'sw.js') res.setHeader('Cache-Control', 'no-cache');
+      else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      }
+    },
+  }));
+  // أي مسار غير /api يعيد index.html (توجيه React Router) — Express 5 لا يقبل '*'.
+  app.get(/^\/(?!api(\/|$)).*/, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(path.join(frontendDist, 'index.html'));
+  });
+}
+
 app.use(notFoundHandler);
 app.use(errorHandler);
 
