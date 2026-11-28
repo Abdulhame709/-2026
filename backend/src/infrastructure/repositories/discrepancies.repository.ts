@@ -65,6 +65,21 @@ interface Row {
 const iso = (d: Date | string | null): string | null =>
   d == null ? null : d instanceof Date ? d.toISOString() : String(d);
 
+/** استعلام واحد لصف الفرق الكامل — مشترك بين القائمة والجلب بعد التعديل */
+const FULL_SELECT = `SELECT d.*,
+        rc.name_ar AS reason_name,
+        u.full_name AS assignee_name,
+        p.name_ar AS partner_name,
+        s.period_label, s.currency_code, s.account_id,
+        ol.description AS line_description, ol.entry_date AS line_date
+ FROM discrepancies d
+ JOIN reconciliation_sessions s ON s.id = d.session_id
+ JOIN accounts a ON a.id = s.account_id
+ JOIN partners p ON p.id = a.partner_id
+ LEFT JOIN reason_codes rc ON rc.id = d.reason_code_id
+ LEFT JOIN users u ON u.id = d.assignee_id
+ LEFT JOIN statement_lines ol ON ol.id = COALESCE(d.our_line_id, d.their_line_id)`;
+
 const toFull = (r: Row): DiscrepancyFull => ({
   id: Number(r.id),
   sessionId: Number(r.session_id),
@@ -116,24 +131,18 @@ export class DiscrepanciesRepository {
       where.push(`s.account_id = $${params.length}`);
     }
     const { rows } = await this.pool.query<Row>(
-      `SELECT d.*,
-              rc.name_ar AS reason_name,
-              u.full_name AS assignee_name,
-              p.name_ar AS partner_name,
-              s.period_label, s.currency_code, s.account_id,
-              ol.description AS line_description, ol.entry_date AS line_date
-       FROM discrepancies d
-       JOIN reconciliation_sessions s ON s.id = d.session_id
-       JOIN accounts a ON a.id = s.account_id
-       JOIN partners p ON p.id = a.partner_id
-       LEFT JOIN reason_codes rc ON rc.id = d.reason_code_id
-       LEFT JOIN users u ON u.id = d.assignee_id
-       LEFT JOIN statement_lines ol ON ol.id = COALESCE(d.our_line_id, d.their_line_id)
+      `${FULL_SELECT}
        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY d.id DESC`,
       params,
     );
     return rows.map(toFull);
+  }
+
+  /** صف فرق واحد كاملاً — بلا تحميل كل الفروق بعد كل تعديل */
+  async getFull(id: number): Promise<DiscrepancyFull | null> {
+    const { rows } = await this.pool.query<Row>(`${FULL_SELECT} WHERE d.id = $1`, [id]);
+    return rows[0] ? toFull(rows[0]) : null;
   }
 
   /**

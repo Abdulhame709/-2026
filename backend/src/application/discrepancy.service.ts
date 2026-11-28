@@ -31,8 +31,19 @@ export class DiscrepancyService {
     patch: { status?: DiscrepancyStatus; assigneeId?: number | null; reasonCodeId?: number | null; resolutionNote?: string | null },
     ip: string | null,
   ): Promise<DiscrepancyFull> {
-    const existing = await this.discrepancies.getById(id);
+    const existing = await this.discrepancies.getFull(id);
     if (!existing) throw ERR.NOT_FOUND();
+    // إغلاق الفرق (محلول/مقبول) يحتاج توثيقاً — الواجهة تفرضه، والخادم يضمنه.
+    const effectiveStatus = patch.status ?? existing.status;
+    if (['resolved', 'accepted'].includes(effectiveStatus)) {
+      const note = (patch.resolutionNote ?? existing.resolutionNote ?? '').trim();
+      if (note.length < 5) {
+        throw ERR.VALIDATION([{
+          field: 'resolutionNote',
+          messageAr: 'إغلاق الفرق يتطلب ملاحظة حل (5 أحرف على الأقل) — الذاكرة المؤسسية لا تُختصر',
+        }]);
+      }
+    }
     const ok = await this.discrepancies.update(id, patch);
     if (!ok) throw ERR.NOT_FOUND();
     await this.audit.write({
@@ -43,15 +54,21 @@ export class DiscrepancyService {
       after: patch,
       ip,
     });
-    const [row] = await this.discrepancies.list({ sessionId: existing.sessionId });
-    const all = await this.discrepancies.list({});
-    return all.find((d) => d.id === id) ?? row;
+    const updated = await this.discrepancies.getFull(id);
+    if (!updated) throw ERR.NOT_FOUND();
+    return updated;
   }
 
   /** الترحيل: نفس الحساب فقط + جلسة مفتوحة — يظهر في الجلسة التالية كمتبقٍ معروف */
   async carry(actorId: number, id: number, targetSessionId: number, ip: string | null) {
-    const existing = await this.discrepancies.getById(id);
+    const existing = await this.discrepancies.getFull(id);
     if (!existing) throw ERR.NOT_FOUND();
+    if (targetSessionId === existing.sessionId) {
+      throw ERR.VALIDATION([{ field: 'targetSessionId', messageAr: 'لا يُرحَّل الفرق إلى جلسته نفسها — اختر الجلسة التالية' }]);
+    }
+    if (existing.carriedToSessionId === targetSessionId) {
+      throw ERR.VALIDATION([{ field: 'targetSessionId', messageAr: 'الفرق مُرحَّل مسبقاً إلى هذه الجلسة' }]);
+    }
     const target = await this.sessions.getById(targetSessionId);
     if (!target) throw ERR.VALIDATION([{ field: 'targetSessionId', messageAr: 'الجلسة الهدف غير موجودة' }]);
     if (target.accountId !== existing.accountId) {
