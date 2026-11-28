@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { MatchingService } from '../dist/application/matching.service.js';
 import { SessionService, computeProgress } from '../dist/application/sessions.service.js';
+import { DiscrepancyService } from '../dist/application/discrepancy.service.js';
 import { validateOcrImage } from '../dist/application/ocr.service.js';
 import { parseStatementFile } from '../dist/infrastructure/parsing/statementParser.js';
 
@@ -152,6 +153,47 @@ test('a sub-cent residual is reported at close instead of being hidden', async (
   assert.equal(summary.discrepancies.length, 1);
   assert.ok(Math.abs(summary.discrepancies[0].amount - 0.001) < 1e-9);
   assert.equal(regenerated[0].rows.length, 1);
+});
+
+function discrepancyFixture(row = {}) {
+  const base = {
+    id: 5, sessionId: 3, accountId: 1, status: 'new', resolutionNote: null, carriedToSessionId: null,
+    ...row,
+  };
+  const saved = [];
+  let current = { ...base };
+  const discrepancies = {
+    getFull: async (id) => (id === base.id ? { ...current } : null),
+    update: async (id, patch) => { saved.push(patch); current = { ...current, ...patch }; return true; },
+    setCarried: async () => true,
+  };
+  const service = new DiscrepancyService(
+    discrepancies,
+    { getById: async () => ({ id: 4, accountId: 1, status: 'open' }) },
+    { write: async () => {} },
+    { listReasonCodes: async () => [] },
+  );
+  return { service, saved };
+}
+
+test('closing a discrepancy needs a written resolution note, server-side', async () => {
+  const { service, saved } = discrepancyFixture();
+  await assert.rejects(service.update(1, 5, { status: 'resolved' }, null), { code: 'VALIDATION_FAILED' });
+  await assert.rejects(service.update(1, 5, { status: 'resolved', resolutionNote: 'تم ' }, null), { code: 'VALIDATION_FAILED' });
+  assert.equal(saved.length, 0);
+
+  const row = await service.update(1, 5, { status: 'resolved', resolutionNote: 'سُدد الفرق نقداً' }, null);
+  assert.equal(row.status, 'resolved');
+  assert.equal(saved.length, 1);
+});
+
+test('a discrepancy cannot be carried to its own or the same target session twice', async () => {
+  const { service } = discrepancyFixture();
+  await assert.rejects(service.carry(1, 5, 3, null), { code: 'VALIDATION_FAILED' });
+
+  const already = discrepancyFixture({ carriedToSessionId: 4 });
+  await assert.rejects(already.service.carry(1, 5, 4, null), { code: 'VALIDATION_FAILED' });
+  assert.deepEqual(await service.carry(1, 5, 4, null), { id: 5, carriedToSessionId: 4 });
 });
 
 test('statement upload rejects mismatched and binary file signatures', () => {
