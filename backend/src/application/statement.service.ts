@@ -334,8 +334,8 @@ export class StatementService {
       lines: draft.lines.map((line) => ({
         lineNo: line.lineNo,
         dateRaw: line.dateRaw,
-        docType: '',
-        docNo: '',
+        docType: line.docType,
+        docNo: line.docNo,
         description: line.description,
         ref: line.ref,
         debitRaw: line.debitRaw,

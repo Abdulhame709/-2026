@@ -414,15 +414,16 @@ export function amountToDebitCredit(value: number, side: StatementSide): { debit
     : { debitRaw: '', creditRaw: String(-value) };
 }
 
-export function parseStatementFile(
-  buffer: Buffer,
-  filename: string,
+/**
+ * تحليل صفوف كشف مُهيّأة مسبقاً — القواعد المشتركة بين Excel/CSV وشبكة PDF:
+ * تخطّي الترويسات المكررة ومجاميع الأرصدة، واستنتاج المدين/الدائن من عمود
+ * مبلغ واحد حسب جهة الكشف. تُستدعى من `parseStatementFile` ومن مسار PDF.
+ */
+export function parseStatementRows(
+  rows: unknown[][],
   template: TemplateMapping,
   side: StatementSide = 'theirs',
-  sheetName?: string | null,
-): ParseResult {
-  const { sheets } = readStatementWorkbook(buffer, filename);
-
+): Omit<ParseResult, 'sheetName' | 'sheetNames'> {
   const col = {} as Record<FieldKey, number | null>;
   for (const key of FIELD_KEYS) {
     const letter = template.columnsMapping[key];
@@ -431,46 +432,31 @@ export function parseStatementFile(
   if (col.date == null) {
     throw ERR.VALIDATION([{ field: 'template', messageAr: 'القالب لا يحدد عمود التاريخ (date) — عدّل تعيين الأعمدة' }]);
   }
-  const amountKey: FieldKey | null = col.amount != null ? 'amount' : col.balance != null ? 'balance' : null;
-  const numericColumns = [col.debit, col.credit, col.amount, col.balance]
-    .filter((index): index is number => index !== null);
-
-  // اختيار الورقة: طلب المستخدم أولاً، ثم الورقة الوحيدة التي فيها بنود فعلية
-  const requested = sheetName?.trim();
-  let selected: WorkbookSheet | undefined;
-  if (requested) {
-    selected = sheets.find((sheet) => sheet.name === requested)
-      ?? sheets.find((sheet) => sheet.name.trim().toLowerCase() === requested.toLowerCase());
-    if (!selected) {
-      throw ERR.VALIDATION([{ field: 'sheetName', messageAr: `الورقة «${requested}» غير موجودة — المتاح: ${sheets.map((sheet) => sheet.name).join('، ')}` }]);
-    }
-  } else {
-    const candidates = sheets.filter((sheet) => sheet.rows.slice(template.headerRows).some((row) =>
-      parseDate(row[col.date!], template.dateFormats) !== null &&
-      numericColumns.some((index) => parseAmount(CELL(row[index]), template.decimalSep, template.thousandSep) !== null)));
-    if (candidates.length > 1) {
-      throw ERR.VALIDATION([{ field: 'file', messageAr: `توجد معاملات في عدة أوراق (${candidates.map((sheet) => sheet.name).join('، ')}) — اختر الورقة المطلوبة من لوحة التعيين حتى لا تُهمل بنوداً` }]);
-    }
-    selected = candidates[0] ?? sheets[0];
-  }
-  const rows = selected?.rows ?? [];
-  const selectedName = selected?.name ?? '';
-  if (!rows.length) {
-    throw ERR.VALIDATION([{ field: 'file', messageAr: 'الملف فارغ — لا صفوف فيه' }]);
-  }
+  // عمود المبلغ/الرصيد يُستخدم فقط عند غياب مدين/دائن صريحين — وإلا لتحوّلت أعمدة
+  // مثل «قيمة البضاعة» أو «الرصيد» إلى حركات وهمية تسرق المجاميع.
+  const hasExplicitSides = col.debit != null || col.credit != null;
+  const amountKey: FieldKey | null = hasExplicitSides
+    ? null
+    : col.amount != null ? 'amount' : col.balance != null ? 'balance' : null;
 
   const lines: RawLine[] = [];
   let opening: number | null = null;
+  /** ظهر صف افتتاحي صريح ولو كان مبلغه فارغاً — كي لا يُلتقط أول إجمالي كافتتاحي */
+  let openingSeen = false;
   let closingHint: number | null = null;
   /** رصيد عام (إجمالي/رصيد بلا وصف صريح) — لا يسبق الرصيد الختامي الصريح */
   let genericClosing: number | null = null;
+  /** آخر رصيد جارٍ في صف حركة — تقدير ختامي عند غياب صف «رصيد ختامي» صريح */
+  let lastBalance: number | null = null;
   let ignoredRows = 0;
   const amountOf = (v: unknown) => parseAmount(CELL(v), template.decimalSep, template.thousandSep);
 
   /** كلمات صفوف الملخص: رصيد/إجمالي/مجموع/نهائي — بلا مساس ببنود فيها «رصيد فاتورة» */
   const TOTAL_ROW = /^(?:ال)?(?:رصيد|اجمالي|إجمالي|مجموع|نهائي|ختامي|total|balance|closing|opening)(?=$|[\s:\-–—])/i;
+  /** مجاميع/تذييلات تظهر داخل النص لا في أوله («YER إجمالي العمليات»، «معلقات فواتير نقدية») */
+  const SUMMARY_ANYWHERE = /(اجمالي|إجمالي|مجموع|الفرق بين|صافي الرصيد|صافي|معلقات|تدوير ارصده|تدوير الأرصدة|رصيد ما قبله)/i;
   const OPENING_ROW = /(افتتاحي|فتتاحي|سابق|مدور|opening|beginning|b\/f|رصيد ما قبله)/i;
-  const CLOSING_ROW = /(ختامي|نهائي|closing|ending|c\/f|رصيد مستحق)/i;
+  const CLOSING_ROW = /((?:رصيد|balance)[^\n]{0,16}(?:ختامي|نهائي|closing|ending)|closing|ending|c\/f|رصيد مستحق)/i;
   /** صف ترويسة مكرر داخل الجدول: كلماته من أسماء الأعمدة لا من بيانات حقيقية */
   const HEADER_WORD = /^(?:التاريخ|تاريخ|البيان|بيان|الوصف|وصف|المبلغ|مبلغ|مدين|دائن|الرصيد|رصيد|المرجع|مرجع|رقم|نوع|العملة|date|description|details|debit|credit|amount|balance|reference|ref|no\.?|number|type|currency)(?=$|[\s:.\-])/i;
 
@@ -506,8 +492,9 @@ export function parseStatementFile(
 
     // صف بلا تاريخ: إما رصيد/إجمالي، أو ترويسة مكررة، أو بيانات بلا تاريخ تحتاج تصحيحاً بشرياً.
     if (dateParsedHere === null) {
-      const isSummary = TOTAL_ROW.test(description) || TOTAL_ROW.test(dateRaw);
+      const isSummary = TOTAL_ROW.test(description) || TOTAL_ROW.test(dateRaw) || SUMMARY_ANYWHERE.test(rowText);
       if (isSummary) {
+        if (OPENING_ROW.test(rowText)) openingSeen = true;
         const bal = parsedAmount ??
           (col.balance != null ? amountOf(at('balance')) : null) ??
           parsedDebit ?? parsedCredit ??
@@ -517,7 +504,7 @@ export function parseStatementFile(
             if (opening === null) opening = bal;
           } else if (CLOSING_ROW.test(rowText)) {
             if (closingHint === null) closingHint = bal;
-          } else if (opening === null) {
+          } else if (opening === null && !openingSeen) {
             opening = bal;
           } else {
             genericClosing = bal;
@@ -526,13 +513,19 @@ export function parseStatementFile(
         ignoredRows += 1;
         return;
       }
+      // تاريخ نصي طويل غير قابل للتحليل = تذييل صفحة/تطبيق («تطبيق مدونة الحسابات») لا بند مالي
+      if (dateRaw && /[A-Za-z\u0600-\u06FF]{3,}/.test(dateRaw)) {
+        ignoredRows += 1;
+        return;
+      }
       // صف ترويسة مكررة داخل الجدول (كلماته أسماء أعمدة لا أرقام) — لا يُعرض كبند
       if (!hasParsedAmount && [dateRaw, debitRaw, creditRaw, amountRaw, description].some((value) => value && HEADER_WORD.test(value))) {
         ignoredRows += 1;
         return;
       }
-      // صف بلا تاريخ وبلا أي مبلغ = ترويسة/زخرفة — لا فائدة من عرضه كبند
-      if (!hasParsedAmount) {
+      // صف بلا تاريخ وبلا أي مبلغ (أو بمبلغ صفري فقط) = ترويسة/زخرفة — لا فائدة من عرضه كبند
+      const nonzeroAmount = [parsedDebit, parsedCredit, parsedAmount].some((value) => value !== null && value !== 0);
+      if (!nonzeroAmount) {
         ignoredRows += 1;
         return;
       }
@@ -546,6 +539,11 @@ export function parseStatementFile(
       }
       ignoredRows += 1;
       return;
+    }
+
+    if (col.balance != null) {
+      const balanceValue = amountOf(at('balance'));
+      if (balanceValue !== null) lastBalance = balanceValue;
     }
 
     lines.push({
@@ -565,6 +563,54 @@ export function parseStatementFile(
       { field: 'file', messageAr: 'لم يُستخرج أي بند — تأكد من تعيين أعمدة التاريخ والبيان والمبلغ مع ترتيب الملف وعدد صفوف الترويسة' },
     ]);
   }
-  if (closingHint === null) closingHint = genericClosing;
-  return { lines, opening, closingHint, sheetName: selectedName, sheetNames: sheets.map((sheet) => sheet.name), ignoredRows };
+  if (closingHint === null) closingHint = genericClosing ?? lastBalance;
+  return { lines, opening, closingHint, ignoredRows };
+}
+
+export function parseStatementFile(
+  buffer: Buffer,
+  filename: string,
+  template: TemplateMapping,
+  side: StatementSide = 'theirs',
+  sheetName?: string | null,
+): ParseResult {
+  const { sheets } = readStatementWorkbook(buffer, filename);
+
+  const col = {} as Record<FieldKey, number | null>;
+  for (const key of FIELD_KEYS) {
+    const letter = template.columnsMapping[key];
+    col[key] = letter ? columnIndex(letter) : null;
+  }
+  if (col.date == null) {
+    throw ERR.VALIDATION([{ field: 'template', messageAr: 'القالب لا يحدد عمود التاريخ (date) — عدّل تعيين الأعمدة' }]);
+  }
+  const numericColumns = [col.debit, col.credit, col.amount, col.balance]
+    .filter((index): index is number => index !== null);
+
+  // اختيار الورقة: طلب المستخدم أولاً، ثم الورقة الوحيدة التي فيها بنود فعلية
+  const requested = sheetName?.trim();
+  let selected: WorkbookSheet | undefined;
+  if (requested) {
+    selected = sheets.find((sheet) => sheet.name === requested)
+      ?? sheets.find((sheet) => sheet.name.trim().toLowerCase() === requested.toLowerCase());
+    if (!selected) {
+      throw ERR.VALIDATION([{ field: 'sheetName', messageAr: `الورقة «${requested}» غير موجودة — المتاح: ${sheets.map((sheet) => sheet.name).join('، ')}` }]);
+    }
+  } else {
+    const candidates = sheets.filter((sheet) => sheet.rows.slice(template.headerRows).some((row) =>
+      parseDate(row[col.date!], template.dateFormats) !== null &&
+      numericColumns.some((index) => parseAmount(CELL(row[index]), template.decimalSep, template.thousandSep) !== null)));
+    if (candidates.length > 1) {
+      throw ERR.VALIDATION([{ field: 'file', messageAr: `توجد معاملات في عدة أوراق (${candidates.map((sheet) => sheet.name).join('، ')}) — اختر الورقة المطلوبة من لوحة التعيين حتى لا تُهمل بنوداً` }]);
+    }
+    selected = candidates[0] ?? sheets[0];
+  }
+  const rows = selected?.rows ?? [];
+  const selectedName = selected?.name ?? '';
+  if (!rows.length) {
+    throw ERR.VALIDATION([{ field: 'file', messageAr: 'الملف فارغ — لا صفوف فيه' }]);
+  }
+
+  const parsed = parseStatementRows(rows, template, side);
+  return { ...parsed, sheetName: selectedName, sheetNames: sheets.map((sheet) => sheet.name) };
 }

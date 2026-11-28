@@ -1,6 +1,14 @@
 import path from 'node:path';
 import { mkdir, copyFile } from 'node:fs/promises';
 import { AppError, ERR } from '../domain/errors.js';
+import { detectColumnMapping } from '../infrastructure/parsing/columnMapping.js';
+import { reconstructPdfTable, type PdfLayout, type PdfTextItem } from '../infrastructure/parsing/pdfTable.js';
+import {
+  parseStatementRows,
+  type RawLine,
+  type StatementSide,
+  type TemplateMapping,
+} from '../infrastructure/parsing/statementParser.js';
 
 /**
  * استخراج بنود كشوف PDF محلياً بالكامل (Module 11 — Q16: لا أي خدمة سحابية):
@@ -102,6 +110,8 @@ const toNum = (raw: string): number | null => {
 export interface OcrLine {
   lineNo: number;
   dateRaw: string;
+  docType: string;
+  docNo: string;
   description: string;
   ref: string;
   debitRaw: string;
@@ -149,6 +159,8 @@ function lineToRow(line: string, lineNo: number, confidence: number | null): Ocr
     return {
       lineNo,
       dateRaw,
+      docType: '',
+      docNo: '',
       description: (description || '—').slice(0, 280),
       ref: '',
       debitRaw: amounts.length >= 1 ? String(Math.abs(amounts[0])) : '',
@@ -171,6 +183,8 @@ function lineToRow(line: string, lineNo: number, confidence: number | null): Ocr
   return {
     lineNo,
     dateRaw,
+    docType: '',
+    docNo: '',
     description: description.slice(0, 280) || '—',
     ref: '',
     debitRaw: amounts.length >= 1 ? String(Math.abs(amounts[0])) : '',
@@ -269,7 +283,7 @@ export class OcrService {
   }
 
   /** استخراج بنود كشف PDF — نص رقمي مباشر إن وُجد، وإلا OCR محلي للصور الممسوحة */
-  async extractPdf(buffer: Buffer): Promise<OcrResult> {
+  async extractPdf(buffer: Buffer, side: StatementSide = 'theirs'): Promise<OcrResult> {
     if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
       throw ERR.VALIDATION([
         { field: 'file', messageAr: 'الملف ليس PDF سليماً (ترويسته مفقودة) — أعد تصديره من نظامك كـ PDF حقيقي' },
@@ -336,6 +350,71 @@ export class OcrService {
     let usedOcr = false;
     let ocrPages = 0;
 
+    /** تخطيط الصفحة الأولى يُ reused لصفحات التكملة التي لا تحمل ترويسة */
+    let priorLayout: PdfLayout | null = null;
+    let priorTemplate: Omit<TemplateMapping, 'headerRows'> | null = null;
+
+    const toOcrLine = (line: RawLine, index: number): OcrLine => ({
+      lineNo: index + 1,
+      dateRaw: line.dateRaw,
+      docType: line.docType,
+      docNo: line.docNo,
+      description: line.description || [line.docType, line.docNo].filter(Boolean).join(' ') || 'بند من كشف PDF',
+      ref: line.ref,
+      debitRaw: line.debitRaw,
+      creditRaw: line.creditRaw,
+      ocrConfidence: null,
+    });
+
+    /**
+     * مسار الجدول: إحداثيات النص → شبكة أعمدة → detectColumnMapping → نفس
+     * قواعد Excel/CSV (افتتاحي/ختامي/مجاميع/جهة الكشف). يفشل بهدوء للرجوع
+     * لمسار الأسطر النصية إن لم تكن الصفحة جدولاً مفهوماً.
+     */
+    const parseTablePage = (items: PdfTextItem[]): { lines: OcrLine[]; opening: number | null } | null => {
+      let table: ReturnType<typeof reconstructPdfTable>;
+      try {
+        table = reconstructPdfTable(items, priorLayout);
+      } catch {
+        return null;
+      }
+      if (!table) return null;
+      try {
+        let template: TemplateMapping;
+        let nextLayout: PdfLayout | null = null;
+        let nextTemplate: Omit<TemplateMapping, 'headerRows'> | null = null;
+        if (table.layout.headerRows > 0) {
+          const detection = detectColumnMapping(table.rows);
+          const hasAmount = Boolean(detection.mapping.debit || detection.mapping.credit || detection.mapping.amount || detection.mapping.balance);
+          if (!detection.mapping.date || !hasAmount) return null;
+          template = {
+            headerRows: detection.headerRows,
+            columnsMapping: detection.mapping as Record<string, string>,
+            dateFormats: detection.dateFormats,
+            decimalSep: detection.decimalSep,
+            thousandSep: detection.thousandSep,
+          };
+          nextTemplate = {
+            columnsMapping: template.columnsMapping,
+            dateFormats: template.dateFormats,
+            decimalSep: template.decimalSep,
+            thousandSep: template.thousandSep,
+          };
+          nextLayout = { anchors: table.layout.anchors, headerRows: 0 };
+        } else {
+          if (!priorTemplate) return null;
+          template = { ...priorTemplate, headerRows: 0 };
+        }
+        const parsed = parseStatementRows(table.rows, template, side);
+        if (!parsed.lines.length) return null;
+        if (nextLayout) priorLayout = nextLayout;
+        if (nextTemplate) priorTemplate = nextTemplate;
+        return { lines: parsed.lines.map(toOcrLine), opening: parsed.opening };
+      } catch {
+        return null;
+      }
+    };
+
     for (let p = 1; p <= doc.numPages; p++) {
       let page: PdfPage;
       try {
@@ -344,16 +423,19 @@ export class OcrService {
         throw ERR.VALIDATION([{ field: 'file', messageAr: `تعذرت قراءة صفحة PDF رقم ${p} — لم يُعتمد كشف ناقص. أعد تصدير الملف` }]);
       }
       let textRaw: string[] = [];
+      let textItems: PdfTextItem[] = [];
       try {
         const tc = await page.getTextContent();
+        textItems = tc.items as unknown as PdfTextItem[];
         textRaw = textLayerLines(tc.items as Array<{ str?: string; transform: number[] }>);
       } catch {
         textRaw = [];
       }
       const chars = textRaw.join(' ').replace(/[^\p{L}\p{N}]/gu, '').length;
-      const textParsed = parseOcrLines(textRaw, null);
+      const tableParsed = textItems.length ? parseTablePage(textItems) : null;
+      const textParsed = tableParsed ?? parseOcrLines(textRaw, null);
       let chosen = textParsed;
-      let pageMode = 'نص';
+      let pageMode = tableParsed ? 'جدول' : 'نص';
 
       const needOcr = textParsed.lines.length === 0;
       if (needOcr) {
