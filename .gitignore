@@ -11,3 +11,6 @@ backend/logs/
 *.dpapi
 *.local
 opencode.json
+
+# Local Netlify folder
+.netlify
